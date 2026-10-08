@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 — 2026-10-08
+
+- Added opt-in machine setup, scoped project roots and a post-commit install hook.
+- New projects install from defaults on the first clean commit; pending installs retry.
+- Existing and cloned repositories are offered installation once, never silently installed.
+- Added marked project/global instructions with preservation of surrounding user text.
+- Unconfigured test commands fail closed; defaults can be overridden explicitly.
+- Added 14 automatic-install scenarios to Linux and macOS CI.
+
 ## 0.2.1 — 2026-10-08
 
 - Verification receipts list gate policy files changed by the branch.

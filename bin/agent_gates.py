@@ -15,7 +15,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 
 
 class Deny(Exception):

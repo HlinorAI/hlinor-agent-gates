@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Installed by setup-global.sh. Never turn a successful commit into failure.
+[ "${AGENT_GATES_INSTALLING:-}" = 1 ] && exit 0
+[ -d .agent-gates ] && exit 0
+state="$HOME/.agent-gates"
+[ -f "$state/roots" ] || exit 0
+repo="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+repo="$(cd "$repo" && pwd -P)" || exit 0
+applies=0
+while IFS= read -r root || [ -n "$root" ]; do
+  [ -n "$root" ] || continue
+  if [ "$repo" = "$root" ] || [[ "$repo" == "${root%/}/"* ]]; then applies=1; break; fi
+done < "$state/roots"
+[ "$applies" = 1 ] || exit 0
+gitdir="$(git rev-parse --absolute-git-dir 2>/dev/null)" || exit 0
+common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || exit 0
+[ "$gitdir" = "$common" ] || exit 0
+pending="$gitdir/agent-gates-pending"
+if [ ! -f "$pending" ]; then
+  if git rev-parse --verify HEAD^ >/dev/null 2>&1 || [ -n "$(git remote)" ]; then
+    offered="$gitdir/agent-gates-offered"
+    [ -f "$offered" ] && exit 0
+    answer=""
+    if [ -t 0 ]; then
+      printf 'Install agent-gates in this repo? [y/N] '
+      read -r answer
+    else
+      echo 'agent-gates: not installed here. To install: ~/.agent-gates/kit/init.sh <repo> --from-defaults'
+    fi
+    : > "$offered"
+    [ "$answer" = y ] || exit 0
+  fi
+fi
+if [ ! -f "$state/kit/init.sh" ]; then
+  echo 'agent-gates: kit missing. Run /path/to/hlinor-agent-gates/setup-global.sh'
+  exit 0
+fi
+if [ -n "$(git status --porcelain)" ]; then
+  echo 'agent-gates: dirty tree; installation deferred until a clean commit'
+  : > "$pending"
+  exit 0
+fi
+# Hooks inherit repository-local Git variables (including GIT_INDEX_FILE).
+# Clear them before init creates and checks out linked worktrees.
+while IFS= read -r variable; do unset "$variable"; done < <(git rev-parse --local-env-vars)
+if output="$(AGENT_GATES_INSTALLING=1 bash "$state/kit/init.sh" "$repo" --from-defaults 2>&1)"; then
+  rm -f "$pending"
+else
+  # A concurrent edit may have made the tree dirty after the check above.
+  if [[ "$output" == *'working tree is not clean.'* ]]; then
+    : > "$pending"
+  fi
+  echo 'agent-gates: install deferred. Run ~/.agent-gates/kit/init.sh <repo> --from-defaults'
+fi
+exit 0

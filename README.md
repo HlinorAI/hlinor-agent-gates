@@ -35,13 +35,39 @@ Requirements: git ≥ 2.38, bash, python3. Optional acceptance signing requires 
 
 Every lock is **write-tested** after it is applied, and the summary says `LOCKED` or `NOT LOCKED (advisory only)` per path. With `--require-locks`, a path that can't be locked aborts the install before anything else is written.
 
-`init.sh` checks everything before changing anything. It refuses a dirty working tree (worktrees branch from the last commit, so uncommitted work would be invisible to every agent), refuses to install twice, and never overwrites your files: its own helpers live in `.agent-gates/`, and if `GIT_POLICY.md` exists it writes `GIT_POLICY.agent-gates.md` for you to merge.
+`init.sh` checks everything before changing anything. It refuses a dirty working tree (worktrees branch from the last commit, so uncommitted work would be invisible to every agent), refuses to install twice, and preserves your text: its own helpers live in `.agent-gates/`, and if `GIT_POLICY.md` exists it writes `GIT_POLICY.agent-gates.md` for you to merge.
 
 Then send each agent the message from `AGENT_ONBOARDING.md`. New agent later:
 
 ```bash
 .agent-gates/add_agent.sh manus
 ```
+
+## Automatic installation (v0.3)
+
+```bash
+./setup-global.sh --root /path/to/projects --agents codex,claude,zcode --dry-run
+./setup-global.sh --root /path/to/projects --agents codex,claude,zcode
+./setup-global.sh --uninstall
+```
+
+Setup copies the kit to `~/.agent-gates/kit`, writes defaults and resolved project
+roots, and sets Git's global `init.templateDir`. A foreign template setting is
+refused without changes. Existing global instruction files receive a marked
+block only when their parent directory exists; surrounding text is preserved.
+Uninstall removes the setting and blocks, leaving the kit and projects intact.
+
+The post-commit hook installs new repositories under those roots after their
+first clean commit. A dirty tree writes a pending marker and retries after a
+clean commit. Existing/cloned repositories are asked in a terminal or notified
+once. Linked worktrees and already installed projects are skipped. Hooks can be
+removed by the same user; this is a setup convenience, not a security boundary.
+
+`init.sh <repo> --from-defaults` reads `AGENTS`, `OWNER_NAME`, and `TEST_CMD` from
+`~/.agent-gates/defaults`; explicit flags override them. Without a test command,
+verification is REJECT until the Owner sets a real command in main's config.
+Installation commits marked blocks in `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`;
+unknown agents use `add_agent.sh <name>` and switch to the printed worktree.
 
 ## Verify, accept, merge (v0.2)
 
@@ -102,7 +128,8 @@ reach. Signing will be mandatory in the separate enforcement mode.
 | Flag | Default |
 |---|---|
 | `--agents a,b,c` | `codex,claude` |
-| `--test-cmd "…"` | `python3 -m pytest tests -q` |
+| `--test-cmd "…"` | fail closed until configured |
+| `--from-defaults` | load `~/.agent-gates/defaults` |
 | `--protect p1,p2` | none |
 | `--require-locks` | off (unlockable paths become advisory) |
 | `--owner` / `--git-agent` / `--orchestrator` / `--publisher` | `owner` / first agent / first agent / owner |
@@ -145,6 +172,7 @@ Today an agent running as the same OS user as you **can** ignore the policy rows
 
 ```bash
 bash tests/test_init.sh   # 26 installation checks
+bash tests/test_setup.sh  # 14 scenarios; isolated HOME and global Git config
 bash tests/test_gates.sh  # 11 required gate scenarios + merge-result, signing, baseline, Git version
 ```
 
