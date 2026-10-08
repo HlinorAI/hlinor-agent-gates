@@ -20,21 +20,21 @@ Rule zero: **no agent implements and approves its own work.**
 - Before starting a task: `git merge {{MAIN_BRANCH}}` in your worktree.
 - Never merge into `{{MAIN_BRANCH}}` yourself. Only the Git Agent merges, and only after Verifier ACCEPT and Owner acceptance.
 - `{{MAIN_REPO}}` is not a workspace. No edits there.
-- New agent: `{{MAIN_REPO}}/scripts/add_agent.sh <name>`.
+- New agent: `{{MAIN_REPO}}/.agent-gates/add_agent.sh <name>`.
 
 ## Remote and publishing
 
 - Local commits are allowed. `git push` is FORBIDDEN for agents. Do not add remotes.
 - Publishing is done only by: {{PUBLISHER}}.
-- Backups: `git bundle create <backups>/<project>-<date>.bundle --all`, verified with `git bundle verify`.
+- Backups: `{{MAIN_REPO}}/.agent-gates/backup.sh` (creates and verifies a `git bundle`).
 
 ## Immutable paths
 
-Locked at the OS level with `chattr -R +i`:
+Locked at the OS level with `{{LOCK_CMD}}`:
 {{PROTECTED_PATHS}}
 
-- "Operation not permitted" there is intentional. Agents must NOT run `chattr`. Stop and ask the Owner.
-- Owner unlock: `chattr -R -i <path>`; re-lock after with `chattr -R +i <path>`.
+- "Operation not permitted" there is intentional. Agents must NOT change file flags or permissions. Stop and ask the Owner.
+- Owner unlock: `{{UNLOCK_CMD}} <path>`; re-lock after with `{{LOCK_CMD}} <path>`.
 
 ## Tests
 

@@ -5,7 +5,8 @@
 # usage: ./init.sh <repo> [options]
 #   --agents a,b,c        agent names (default: codex,claude)
 #   --test-cmd "cmd"      the one test command (default: python3 -m pytest tests -q)
-#   --protect p1,p2       absolute paths to lock with chattr +i (default: none)
+#   --protect p1,p2       absolute paths to lock immutable (default: none)
+#   --require-locks       abort (changing nothing) if any path cannot be locked
 #   --owner NAME          Owner (default: owner)
 #   --git-agent NAME      who merges (default: first agent)
 #   --orchestrator NAME   (default: first agent)
@@ -15,19 +16,22 @@
 #   --dry-run             print what would happen, change nothing
 set -euo pipefail
 
+VERSION="0.1.1"
 KIT="$(cd "$(dirname "$0")" && pwd)"
 die() { echo "ERROR: $*" >&2; exit 1; }
 say() { echo "• $*"; }
 
-[ $# -ge 1 ] || { sed -n '2,17p' "$0"; exit 1; }
-REPO="$(cd "$1" && pwd)"; shift
-AGENTS="codex,claude"; TEST_CMD="python3 -m pytest tests -q"; PROTECT=""
+[ $# -ge 1 ] || { sed -n '2,18p' "$0"; exit 1; }
+[ -d "$1" ] || die "no such directory: $1"
+REPO="$(cd "$1" && pwd -P)"; shift   # -P: macOS /tmp and /var are symlinks
+AGENTS="codex,claude"; TEST_CMD="python3 -m pytest tests -q"; PROTECT=""; REQUIRE_LOCKS=0
 OWNER="owner"; GIT_AGENT=""; ORCH=""; PUBLISHER=""; WT_ROOT=""; BACKUP_DIR=""; DRY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --agents) AGENTS="$2"; shift 2;;
     --test-cmd) TEST_CMD="$2"; shift 2;;
     --protect) PROTECT="$2"; shift 2;;
+    --require-locks) REQUIRE_LOCKS=1; shift;;
     --owner) OWNER="$2"; shift 2;;
     --git-agent) GIT_AGENT="$2"; shift 2;;
     --orchestrator) ORCH="$2"; shift 2;;
@@ -44,9 +48,36 @@ GIT_AGENT="${GIT_AGENT:-$FIRST}"; ORCH="${ORCH:-$FIRST}"; PUBLISHER="${PUBLISHER
 WT_ROOT="${WT_ROOT:-$REPO-wt}"; BACKUP_DIR="${BACKUP_DIR:-$REPO/backups}"
 IFS=',' read -r -a AGENT_LIST <<< "$AGENTS"
 for a in "${AGENT_LIST[@]}"; do [[ "$a" =~ ^[a-z0-9-]+$ ]] || die "agent name '$a': a-z 0-9 - only"; done
+command -v python3 >/dev/null || die "python3 is required"
 
-# --- preflight -------------------------------------------------------------
+# --- lock backend -------------------------------------------------------------
+# Linux: chattr +i (root). macOS: chflags uchg (file owner or root).
+OS="$(uname -s)"
+LOCK_BACKEND="none"
+if [ "$OS" = "Linux" ] && command -v chattr >/dev/null && [ "$(id -u)" = 0 ]; then
+  LOCK_BACKEND="chattr"; LOCK_CMD="chattr -R +i"; UNLOCK_CMD="chattr -R -i"
+elif [ "$OS" = "Darwin" ] && command -v chflags >/dev/null; then
+  LOCK_BACKEND="chflags"; LOCK_CMD="chflags -R uchg"; UNLOCK_CMD="chflags -R nouchg"
+else
+  LOCK_CMD="(unsupported here)"; UNLOCK_CMD="(unsupported here)"
+fi
+
+lock_path()   { $LOCK_CMD "$1" 2>/dev/null; }
+unlock_path() { $UNLOCK_CMD "$1" 2>/dev/null || true; }
+# A lock counts only if a write attempt actually fails.
+lock_holds() {
+  local p="$1"
+  if [ -d "$p" ]; then
+    if ( : > "$p/.agent-gates-locktest" ) 2>/dev/null; then rm -f "$p/.agent-gates-locktest"; return 1; fi
+  else
+    if ( : >> "$p" ) 2>/dev/null; then return 1; fi
+  fi
+  return 0
+}
+
+# --- preflight (nothing is changed before this section passes) -----------------
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "$REPO is not a git repository"
+[ "$(git -C "$REPO" rev-parse --show-toplevel)" = "$REPO" ] || die "$REPO is not the repository root"
 MAIN_BRANCH="$(git -C "$REPO" branch --show-current)"
 [ -n "$MAIN_BRANCH" ] || die "detached HEAD; check out your main branch first"
 git -C "$REPO" rev-parse HEAD >/dev/null 2>&1 || die "no commits yet; make an initial commit first"
@@ -54,11 +85,28 @@ if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
   git -C "$REPO" status --short | head -20
   die "working tree is not clean. Commit or 'git stash' first: worktrees branch from the last commit and would not see these changes."
 fi
+[ -e "$REPO/.agent-gates" ] && die "already installed: $REPO/.agent-gates exists (remove it to reinstall)"
+
+# Docs: write NAME.md, or NAME.agent-gates.md if NAME.md exists. Refuse if both exist.
+DOC_SRC=(); DOC_DST=()
+plan_doc() {
+  local src="$1" dst="$2"
+  if [ -e "$dst" ]; then
+    dst="${dst%.md}.agent-gates.md"
+    [ -e "$dst" ] && die "both $(basename "$2") and $(basename "$dst") exist; nothing changed"
+  fi
+  DOC_SRC+=("$src"); DOC_DST+=("$dst")
+}
+plan_doc "$KIT/templates/GIT_POLICY.md" "$REPO/GIT_POLICY.md"
+plan_doc "$KIT/templates/VERIFIER.md"   "$REPO/VERIFIER.md"
+plan_doc "$KIT/templates/ONBOARDING.md" "$REPO/AGENT_ONBOARDING.md"
+
 for a in "${AGENT_LIST[@]}"; do
   [ -e "$WT_ROOT/$a" ] && die "$WT_ROOT/$a already exists"
   git -C "$REPO" show-ref --quiet "refs/heads/agent/$a" && die "branch agent/$a already exists"
 done
 
+PROTECT_LIST=()
 PROTECT_MD="- (none configured)"
 if [ -n "$PROTECT" ]; then
   PROTECT_MD=""
@@ -68,25 +116,43 @@ if [ -n "$PROTECT" ]; then
     [ -e "$p" ] || die "protected path does not exist: $p"
     PROTECT_MD+="- \`$p\`"$'\n'
   done
+  if [ "$LOCK_BACKEND" = "none" ] && [ "$REQUIRE_LOCKS" = 1 ]; then
+    die "--require-locks: no lock backend here (Linux needs root + chattr; macOS needs chflags). Nothing changed."
+  fi
 fi
 
-echo "hlinor-agent-gates → $REPO"
+echo "hlinor-agent-gates $VERSION → $REPO"
 say "main branch: $MAIN_BRANCH   worktrees: $WT_ROOT/{${AGENTS}}"
 say "roles: orchestrator=$ORCH git-agent=$GIT_AGENT owner=$OWNER publisher=$PUBLISHER"
 say "test command: $TEST_CMD"
-say "protected: ${PROTECT:-none}"
+say "protected: ${PROTECT:-none}   lock backend: $LOCK_BACKEND$([ "$REQUIRE_LOCKS" = 1 ] && echo ' (required)')"
+for i in "${!DOC_DST[@]}"; do say "will write ${DOC_DST[$i]#$REPO/}"; done
+say "will write .agent-gates/ (config, add_agent.sh, backup.sh)"
 [ "$DRY" = 1 ] && { echo "dry run: nothing changed"; exit 0; }
 
-# --- render templates -------------------------------------------------------
+# --- locks first: with --require-locks a failure aborts before anything else ----
+LOCK_STATUS=()
+if [ ${#PROTECT_LIST[@]} -gt 0 ]; then
+  for p in "${PROTECT_LIST[@]}"; do
+    if [ "$LOCK_BACKEND" != "none" ] && lock_path "$p" && lock_holds "$p"; then
+      LOCK_STATUS+=("LOCKED       $p")
+    else
+      [ "$LOCK_BACKEND" != "none" ] && unlock_path "$p"
+      if [ "$REQUIRE_LOCKS" = 1 ]; then
+        for q in "${PROTECT_LIST[@]}"; do [ "$q" = "$p" ] && break; unlock_path "$q"; done
+        die "could not lock $p (filesystem may not support it); earlier locks undone, nothing else changed"
+      fi
+      LOCK_STATUS+=("NOT LOCKED   $p  (advisory only: protected by GIT_POLICY.md text)")
+    fi
+  done
+fi
+
+# --- write files --------------------------------------------------------------
 render() {
-  local src="$1" dst="$2"
-  if [ -e "$dst" ]; then
-    dst="${dst%.md}.agent-gates.md"
-    say "exists, writing $(basename "$dst") instead (merge by hand)"
-  fi
   PROJECT_NAME="$(basename "$REPO")" MAIN_BRANCH="$MAIN_BRANCH" MAIN_REPO="$REPO" WT_ROOT="$WT_ROOT" \
   TEST_CMD="$TEST_CMD" OWNER="$OWNER" GIT_AGENT="$GIT_AGENT" ORCHESTRATOR="$ORCH" PUBLISHER="$PUBLISHER" \
-  PROTECTED_PATHS="$PROTECT_MD" python3 - "$src" "$dst" <<'PY'
+  PROTECTED_PATHS="$PROTECT_MD" LOCK_CMD="$LOCK_CMD" UNLOCK_CMD="$UNLOCK_CMD" \
+  python3 - "$1" "$2" <<'PY'
 import os, re, sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src, encoding="utf-8").read()
@@ -94,19 +160,16 @@ def sub(m):
     key = m.group(1)
     if key not in os.environ: raise SystemExit(f"missing template var {key}")
     return os.environ[key].rstrip("\n")
-open(dst, "w", encoding="utf-8").write(re.sub(r"\{\{([A-Z_]+)\}\}", sub, text))
+open(dst, "x", encoding="utf-8").write(re.sub(r"\{\{([A-Z_]+)\}\}", sub, text))
 PY
 }
+for i in "${!DOC_DST[@]}"; do render "${DOC_SRC[$i]}" "${DOC_DST[$i]}"; done
 
-render "$KIT/templates/GIT_POLICY.md" "$REPO/GIT_POLICY.md"
-render "$KIT/templates/VERIFIER.md"   "$REPO/VERIFIER.md"
-render "$KIT/templates/ONBOARDING.md" "$REPO/AGENT_ONBOARDING.md"
-
-mkdir -p "$REPO/scripts"
-install -m 755 "$KIT/templates/add_agent.sh" "$REPO/scripts/add_agent.sh"
-install -m 755 "$KIT/templates/backup.sh"    "$REPO/scripts/backup.sh"
-cat > "$REPO/.agent-gates.conf" <<EOF
-# written by hlinor-agent-gates init.sh
+mkdir "$REPO/.agent-gates"
+install -m 755 "$KIT/templates/add_agent.sh" "$REPO/.agent-gates/add_agent.sh"
+install -m 755 "$KIT/templates/backup.sh"    "$REPO/.agent-gates/backup.sh"
+cat > "$REPO/.agent-gates/config" <<EOF
+# written by hlinor-agent-gates $VERSION
 MAIN_BRANCH="$MAIN_BRANCH"
 WT_ROOT="$WT_ROOT"
 BACKUP_DIR="$BACKUP_DIR"
@@ -114,31 +177,26 @@ EOF
 
 GI="$REPO/.gitignore"
 touch "$GI"
+[ -s "$GI" ] && [ "$(tail -c1 "$GI")" != "" ] && echo >> "$GI"
 for line in "backups/" "*.orig" "__pycache__/"; do grep -qxF "$line" "$GI" || echo "$line" >> "$GI"; done
 
-git -C "$REPO" add GIT_POLICY*.md VERIFIER*.md AGENT_ONBOARDING*.md scripts/add_agent.sh scripts/backup.sh .agent-gates.conf .gitignore
-git -C "$REPO" commit -q -m "Add hlinor-agent-gates: roles, worktrees, verifier checklist"
+git -C "$REPO" add .gitignore .agent-gates "${DOC_DST[@]}"
+git -C "$REPO" commit -q -m "Add hlinor-agent-gates $VERSION: roles, worktrees, verifier checklist"
 say "committed $(git -C "$REPO" rev-parse --short HEAD)"
 
-# --- worktrees --------------------------------------------------------------
+# --- worktrees ----------------------------------------------------------------
 mkdir -p "$WT_ROOT"
 for a in "${AGENT_LIST[@]}"; do
   git -C "$REPO" worktree add -q "$WT_ROOT/$a" -b "agent/$a" "$MAIN_BRANCH"
   say "worktree $WT_ROOT/$a on agent/$a"
 done
 
-# --- OS-level locks ---------------------------------------------------------
-if [ -n "$PROTECT" ]; then
-  if [ "$(id -u)" = 0 ] && command -v chattr >/dev/null; then
-    for p in "${PROTECT_LIST[@]}"; do
-      if chattr -R +i "$p" 2>/dev/null; then say "locked $p"
-      else say "WARN: chattr failed on $p (filesystem may not support it). Run by hand: chattr -R +i $p"; fi
-    done
-  else
-    say "WARN: need root + chattr to lock paths. Run: sudo chattr -R +i ${PROTECT//,/ }"
-  fi
+if [ ${#LOCK_STATUS[@]} -gt 0 ]; then
+  echo
+  echo "Path locks (write-tested):"
+  for s in "${LOCK_STATUS[@]}"; do echo "  $s"; done
 fi
 
 echo
-echo "Done. Next (2 min): send each agent the 'Any Coder agent' message from $REPO/AGENT_ONBOARDING.md"
+echo "Done. Next (2 min): send each agent the 'Any Coder agent' message from AGENT_ONBOARDING.md"
 echo "Check: git -C $REPO worktree list"

@@ -3,7 +3,7 @@
 set -euo pipefail
 repo="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
 # shellcheck disable=SC1091
-source "$repo/.agent-gates.conf"
+source "$repo/.agent-gates/config"
 name="${1:?usage: add_agent.sh <name>}"
 [[ "$name" =~ ^[a-z0-9-]+$ ]] || { echo "name: a-z 0-9 - only"; exit 1; }
 wt="$WT_ROOT/$name"

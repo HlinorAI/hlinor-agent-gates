@@ -9,7 +9,7 @@ Your working folder: {{WT_ROOT}}/<name> (branch agent/<name>).
 1. cd there, run: git merge {{MAIN_BRANCH}}
 2. Read GIT_POLICY.md fully before any change.
 3. Tests: only `{{TEST_CMD}}`.
-4. Never edit {{MAIN_REPO}}, never merge, never push, never run chattr.
+4. Never edit {{MAIN_REPO}}, never merge, never push, never change file flags or permissions.
 Confirm with: pwd && git branch --show-current
 ```
 

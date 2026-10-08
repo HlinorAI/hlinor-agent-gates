@@ -1,0 +1,18 @@
+name: test
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git
+        run: git config --global user.email ci@example.com && git config --global user.name ci && git config --global init.defaultBranch main
+      - name: Tests (Linux as root to exercise chattr)
+        if: runner.os == 'Linux'
+        run: sudo -E env "PATH=$PATH" HOME="$HOME" bash tests/test_init.sh
+      - name: Tests (macOS)
+        if: runner.os == 'macOS'
+        run: bash tests/test_init.sh

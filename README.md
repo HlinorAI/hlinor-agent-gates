@@ -17,9 +17,9 @@ Coder ──► Verifier (a different agent) ──► Owner (you) ──► Git
 | 1 | One worktree + branch per agent (`<repo>-wt/<name>`, `agent/<name>`) | git |
 | 2 | Roles: Coder / Verifier / Owner / Git Agent. Nobody approves their own work | `GIT_POLICY.md` |
 | 3 | Verifier checklist: re-run the **full** suite, compare test counts, check baseline, hunt fail-open defaults | `VERIFIER.md` |
-| 4 | Paths agents must never touch | **OS** (`chattr +i`), not a prompt |
+| 4 | Paths agents must never touch | **OS** (`chattr +i` on Linux, `chflags uchg` on macOS), write-tested, not a prompt |
 | 5 | One test command for everyone | `GIT_POLICY.md` |
-| 6 | No push by agents; verified `git bundle` backups | policy + `scripts/backup.sh` |
+| 6 | No push by agents; verified `git bundle` backups | policy + `.agent-gates/backup.sh` |
 
 ## Install
 
@@ -28,17 +28,19 @@ git clone https://github.com/HlinorAI/hlinor-agent-gates
 cd hlinor-agent-gates
 ./init.sh /path/to/your/repo --agents codex,claude,zcode --owner you --dry-run   # preview
 ./init.sh /path/to/your/repo --agents codex,claude,zcode --owner you \
-  --protect /path/to/your/repo/exports/live,/srv/sent-mail
+  --protect /srv/exports/approved,/srv/sent-mail --require-locks
 ```
 
-Requirements: git ≥ 2.5, bash, python3. Locking paths needs root and a filesystem that supports `chattr` (ext4, xfs).
+Requirements: git ≥ 2.5, bash, python3. Path locks: Linux needs root + `chattr` on a filesystem that supports it (ext4, xfs); macOS uses `chflags uchg`.
 
-`init.sh` refuses to run on a dirty working tree (worktrees branch from the last commit, so uncommitted work would be invisible to every agent). It never overwrites your files: if `GIT_POLICY.md` exists, it writes `GIT_POLICY.agent-gates.md` for you to merge.
+Every lock is **write-tested** after it is applied, and the summary says `LOCKED` or `NOT LOCKED (advisory only)` per path. With `--require-locks`, a path that can't be locked aborts the install before anything else is written.
+
+`init.sh` checks everything before changing anything. It refuses a dirty working tree (worktrees branch from the last commit, so uncommitted work would be invisible to every agent), refuses to install twice, and never overwrites your files: its own helpers live in `.agent-gates/`, and if `GIT_POLICY.md` exists it writes `GIT_POLICY.agent-gates.md` for you to merge.
 
 Then send each agent the message from `AGENT_ONBOARDING.md`. New agent later:
 
 ```bash
-scripts/add_agent.sh manus
+.agent-gates/add_agent.sh manus
 ```
 
 ## Options
@@ -48,6 +50,7 @@ scripts/add_agent.sh manus
 | `--agents a,b,c` | `codex,claude` |
 | `--test-cmd "…"` | `python3 -m pytest tests -q` |
 | `--protect p1,p2` | none |
+| `--require-locks` | off (unlockable paths become advisory) |
 | `--owner` / `--git-agent` / `--orchestrator` / `--publisher` | `owner` / first agent / first agent / owner |
 | `--wt-root DIR` | `<repo>-wt` |
 | `--backup-dir DIR` | `<repo>/backups` |
@@ -64,10 +67,29 @@ One session on a real production repo (multi-agent platform, ~100 tests, 3 agent
 
 None of these were caught by the agent that wrote the code. All of them were caught by a second agent following `VERIFIER.md` and refusing to trust the first one's report.
 
+## Guarantees: what is enforced and what is policy
+
+Be precise about this, because the name says "gates".
+
+| | Enforced by the machine | Policy only (agents are told) |
+|---|---|---|
+| Separate folder + branch per agent | ✅ git | |
+| Locked paths | ✅ OS flag, write-tested | if it shows `NOT LOCKED` |
+| Verifier ≠ author, Owner accepts, only Git Agent merges | | ⚠️ `GIT_POLICY.md` |
+| No push | | ⚠️ `GIT_POLICY.md` |
+
+Today an agent running as the same OS user as you **can** ignore the policy rows, and can remove a lock flag it is able to set. Worktrees share one `.git`, so any agent that can commit can also move `main`. Real enforcement needs agents in separate clones under separate OS users, with merges allowed only against an approval receipt bound to the reviewed commit SHA. That is v0.2.
+
 ## What this is not
 
 - Not an orchestrator. It doesn't launch agents, manage tmux, or open PRs. Use it alongside SwarmGit, opentree, agent-worktree or plain terminals.
-- Not a sandbox. Agents still run with your user's permissions. Running agents as a separate unprivileged user is the next step (planned).
+- Not a sandbox. See the table above.
+
+## Development
+
+```bash
+tests/test_init.sh        # 26 checks: dirty tree, dry run, reinstall, no-overwrite, bad input, backups, locks
+```
 
 ## License
 
