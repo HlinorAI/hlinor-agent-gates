@@ -45,6 +45,8 @@ Then send each agent the message from `AGENT_ONBOARDING.md`. New agent later:
 
 ## Verify, accept, merge (v0.2)
 
+Always run `<main>/.agent-gates/agent-gates`; a copy in an author worktree is not trusted.
+
 After installation, run the installed CLI from any directory:
 
 ```bash
@@ -60,6 +62,8 @@ records a skipped baseline. Failed tests still produce a REJECT receipt.
 Every CLI copy reads policy only from the main checkout, including the test
 command; a worktree-local config cannot override it. Accept and merge reject a
 receipt with a different command using `TEST_CMD_MISMATCH`.
+Verify records `policy_files_changed` and warns for changes under `.agent-gates/`,
+`bin/` or to `init.sh`. Accept repeats this warning; it does not deny the change.
 Accept displays the author, verifier, commits, diffstat, test command and both summaries;
 type `yes` to accept, or use `--yes` for scripted use. Acceptance expires after
 24 hours by default. A new commit on either branch requires fresh verification.

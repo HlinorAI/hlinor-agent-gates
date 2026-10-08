@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 — 2026-10-08
+
+- Verification receipts list gate policy files changed by the branch.
+- Verify and accept warn about policy changes without denying them.
+- Document the trusted main CLI path and add a policy-change regression test.
+
 ## 0.2.0 — 2026-10-08
 
 - Added stdlib Python CLI with Bash entry point: verify, accept, merge and status.
