@@ -71,7 +71,12 @@ def git_version():
 
 def config():
     here = Path(__file__).resolve().parent
-    path = here / "config"
+    # Git's primary checkout is the installed main repo; never bootstrap policy
+    # from the script's worktree-local config.
+    worktrees = git(here, "worktree", "list", "--porcelain").split("\n\n")
+    primary = worktrees[0].splitlines()
+    main = Path(primary[0].removeprefix("worktree ")).resolve()
+    path = main / ".agent-gates" / "config"
     if not path.is_file():
         raise EnvironmentError_("installed .agent-gates/config not found")
     values = {}
@@ -95,13 +100,8 @@ def config():
             raise ValueError()
     except ValueError:
         raise EnvironmentError_("invalid ACCEPT_TTL_HOURS")
-    main = None
-    for block in git(here, "worktree", "list", "--porcelain").split("\n\n"):
-        rows = block.splitlines()
-        if "branch refs/heads/" + values["MAIN_BRANCH"] in rows:
-            main = Path(rows[0].removeprefix("worktree ")).resolve()
-    if main is None:
-        raise EnvironmentError_("main branch has no checkout")
+    if "branch refs/heads/" + values["MAIN_BRANCH"] not in primary:
+        raise EnvironmentError_("primary checkout is not the configured main branch")
     common = Path(git(main, "rev-parse", "--path-format=absolute", "--git-common-dir"))
     values["repo"], values["receipts"] = main, common / "agent-gates" / "receipts"
     return values
@@ -166,7 +166,7 @@ class Gates:
                 raise ValueError()
             required = {
                 "verification": ("repo", "branch", "author", "verifier", "base_sha",
-                                 "head_sha", "merge_tree", "verdict", "result", "baseline"),
+                                 "head_sha", "merge_tree", "test_cmd", "verdict", "result", "baseline"),
                 "acceptance": ("verification_id", "verification_sha256", "owner",
                                "created_at", "expires_at", "signature"),
                 "merge": ("acceptance_id", "merge_commit", "merged_by", "created_at"),
@@ -192,6 +192,10 @@ class Gates:
             raise Deny("SELF_VERIFICATION", "author cannot verify its own change")
         if verification["branch"] != "agent/" + verification["author"]:
             raise Deny("RECEIPT_TAMPERED", "author does not match branch")
+
+    def test_command(self, verification):
+        if verification["test_cmd"] != self.cfg["TEST_CMD"]:
+            raise Deny("TEST_CMD_MISMATCH", "verification test command differs from main config")
 
     def test(self, commit):
         with tempfile.TemporaryDirectory(prefix="agent-gates-test-") as temp:
@@ -265,11 +269,12 @@ class Gates:
     def accept(self, args):
         verification, raw = self.load("verification", args.identifier)
         self.verdict(verification)
+        self.test_command(verification)
         self.fresh(verification)
         print("author: " + verification["author"] + "; verifier: " + verification["verifier"])
         print(git(self.repo, "log", "--oneline", verification["base_sha"] + ".." + verification["head_sha"]))
         print(git(self.repo, "diff", "--stat", verification["base_sha"], verification["head_sha"]))
-        print("tests: " + verification["result"]["summary"])
+        print("test_cmd: " + verification["test_cmd"] + "; tests: " + verification["result"]["summary"])
         print("baseline: " + verification["baseline"].get("summary", "SKIPPED"))
         if not args.yes and input("Accept this verification? Type yes: ").strip() != "yes":
             raise EnvironmentError_("acceptance not confirmed")
@@ -313,6 +318,7 @@ class Gates:
         if digest(raw) != acceptance["verification_sha256"]:
             raise Deny("RECEIPT_TAMPERED", "accepted verification bytes changed")
         self.verdict(verification)
+        self.test_command(verification)
         # Replay is diagnosed before freshness: a successful merge necessarily moves main.
         for path in self.directory.glob("merge-*.json"):
             merged, _ = self.load("merge", path.stem.removeprefix("merge-"))
@@ -365,6 +371,7 @@ class Gates:
                 if args.branch and verification["branch"] != args.branch:
                     continue
                 self.verdict(verification)
+                self.test_command(verification)
                 self.fresh(verification)
                 state = "VALID"
             except Deny as exc:

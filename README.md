@@ -57,7 +57,10 @@ After installation, run the installed CLI from any directory:
 Verify tests a detached worktree of the **merge result**, with the current main
 and branch as parents. It also tests main as baseline; `--no-baseline` explicitly
 records a skipped baseline. Failed tests still produce a REJECT receipt.
-Accept displays the author, verifier, commits, diffstat and both summaries;
+Every CLI copy reads policy only from the main checkout, including the test
+command; a worktree-local config cannot override it. Accept and merge reject a
+receipt with a different command using `TEST_CMD_MISMATCH`.
+Accept displays the author, verifier, commits, diffstat, test command and both summaries;
 type `yes` to accept, or use `--yes` for scripted use. Acceptance expires after
 24 hours by default. A new commit on either branch requires fresh verification.
 

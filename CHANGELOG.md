@@ -9,6 +9,8 @@
 - Merge refuses stale refs, dirty main, tampered or reused receipts and invalid signatures.
 - Installer requires Git 2.38 and installs CLI plus configured test/Owner settings.
 - Added gate regression tests to both Linux and macOS CI.
+- Policy is loaded only from main; accept/merge reject a mismatched test command.
+- Signature tests report SKIP when ssh-keygen is unavailable.
 - Same-user direct Git remains outside the v0.2 enforcement boundary.
 
 ## 0.1.1 — 2026-10-08

@@ -2,14 +2,19 @@
 # Required v0.2 negative scenarios plus merge-result/baseline/installation checks.
 set -uo pipefail
 KIT="$(cd "$(dirname "$0")/.." && pwd -P)"
-T="$(mktemp -d)"
+T="$(mktemp -d)" || exit 2
 trap 'rm -rf "$T"' EXIT
-pass=0; fail=0
+pass=0; fail=0; skipped=0
 ok() { echo "PASS $1"; pass=$((pass+1)); }
 bad() { echo "FAIL $1"; fail=$((fail+1)); }
 check() {
   if "$2" >"$T/check.log" 2>&1; then ok "$1"
   else bad "$1"; cat "$T/check.log"; fi
+}
+skip() { echo "SKIP $1 (ssh-keygen unavailable)"; skipped=$((skipped+1)); }
+check_signed() {
+  if command -v ssh-keygen >/dev/null 2>&1; then check "$@"
+  else skip "$1"; fi
 }
 setup() {
   r="$T/$1"; mkdir -p "$r"
@@ -196,21 +201,73 @@ HOOK
     [ -z "$(git -C "$r" status --porcelain)" ] &&
     [ "$(find "$receipts" -name 'merge-*.json' | wc -l | tr -d ' ')" = 0 ]
 }
+fake_acceptance() {
+  # Unsigned attacker fixture: merge must still check verdict and TEST_CMD.
+  a="$(python3 - "$receipts/verification-$v.json" <<'PYCODE'
+import hashlib,json,pathlib,sys
+path=pathlib.Path(sys.argv[1]); verification=json.loads(path.read_bytes())
+record={"kind":"acceptance","schema":1,"verification_id":verification["id"],
+        "verification_sha256":hashlib.sha256(path.read_bytes()).hexdigest(),
+        "owner":"owner","created_at":"2026-10-08T00:00:00Z",
+        "expires_at":"2099-01-01T00:00:00Z","signature":None}
+dump=lambda value:json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
+record["id"]=hashlib.sha256(dump(record)).hexdigest()[:12]
+(path.parent/("acceptance-"+record["id"]+".json")).write_bytes(dump(record))
+print(record["id"])
+PYCODE
+)" || return 1
+}
+t17() {
+  setup r17 || return 1
+  echo 'echo "0 passed, 1 failed"; exit 1' > "$wt/check.sh"
+  git -C "$wt" add check.sh; git -C "$wt" commit -qm failing || return 1
+  # Uncommitted override in the author's config must have no effect.
+  printf 'TEST_CMD="true"\n' >> "$wt/.agent-gates/config"
+  before="$(git -C "$r" rev-parse HEAD)"
+  v="$("$wt/.agent-gates/agent-gates" verify agent/codex --as claude)" || return 1
+  [ "$(value "$receipts/verification-$v.json" test_cmd)" = "bash check.sh" ] &&
+    [ "$(value "$receipts/verification-$v.json" verdict)" = REJECT ] &&
+    [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] || return 1
+  deny NOT_ACCEPTED_BY_VERIFIER "$cli" accept "$v" --yes &&
+    fake_acceptance &&
+    deny NOT_ACCEPTED_BY_VERIFIER "$cli" merge "$a"
+}
+t18() {
+  setup r18 && verify || return 1
+  owner_output="$("$cli" accept "$v" --yes)" || return 1
+  [[ "$owner_output" == *"test_cmd: bash check.sh; tests: "* ]] || return 1
+  # Model an old receipt produced by the previous vulnerable CLI.
+  v="$(python3 - "$receipts/verification-$v.json" <<'PYCODE'
+import hashlib,json,pathlib,sys
+path=pathlib.Path(sys.argv[1]); record=json.loads(path.read_bytes())
+record["test_cmd"]="true"; del record["id"]
+dump=lambda value:json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
+record["id"]=hashlib.sha256(dump(record)).hexdigest()[:12]
+(path.parent/("verification-"+record["id"]+".json")).write_bytes(dump(record))
+print(record["id"])
+PYCODE
+)" || return 1
+  deny TEST_CMD_MISMATCH "$cli" accept "$v" --yes &&
+    fake_acceptance &&
+    deny TEST_CMD_MISMATCH "$cli" merge "$a"
+}
 check "1 self verification" t1
 check "2 dirty main" t2
 check "3 rejected tests cannot be accepted" t3
 check "4 branch moved at accept and merge" t4
 check "5 main moved at accept and merge" t5
 check "6 verification bytes tampered" t6
-check "7 signed acceptance tampered" t7
+check_signed "7 signed acceptance tampered" t7
 check "8 acceptance expired" t8
 check "9 acceptance reused" t9
 check "10 conflicting merge" t10
 check "11 happy path, receipts, output hashes, UNSIGNED" t11
 check "merge result tested, baseline recorded" t12
 check "baseline can be explicitly skipped" t13
-check "signed happy path" t14
+check_signed "signed happy path" t14
 check "old Git refused before effects" t15
 check "hook changed tree rolls back merge" t16
-echo; echo "$pass passed, $fail failed"
+check "worktree TEST_CMD override cannot approve failing tests" t17
+check "old mismatched runner refused at accept and merge" t18
+echo; echo "$pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ]
