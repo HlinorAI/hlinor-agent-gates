@@ -2,12 +2,19 @@
 
 ## 0.3.0 — 2026-10-08
 
+- BREAKING: init.sh without --test-cmd now fails closed (was: python3 -m pytest tests -q)
+
 - Added opt-in machine setup, scoped project roots and a post-commit install hook.
 - New projects install from defaults on the first clean commit; pending installs retry.
 - Existing and cloned repositories are offered installation once, never silently installed.
 - Added marked project/global instructions with preservation of surrounding user text.
 - Unconfigured test commands fail closed; defaults can be overridden explicitly.
 - Added 14 automatic-install scenarios to Linux and macOS CI.
+
+### Known limitations
+
+- Policy warning uses two-dot diff — false positives when main moved.
+- setup-global without --root configures no roots silently.
 
 ## 0.2.1 — 2026-10-08
 
