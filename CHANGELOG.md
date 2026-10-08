@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0 — 2026-10-08
+
+- Added stdlib Python CLI with Bash entry point: verify, accept, merge and status.
+- Verification tests the exact merge tree and main baseline in temporary worktrees.
+- Canonical receipts, test logs and hashes live in the shared Git common directory.
+- Owner acceptances support a 24-hour TTL and optional SSH signatures.
+- Merge refuses stale refs, dirty main, tampered or reused receipts and invalid signatures.
+- Installer requires Git 2.38 and installs CLI plus configured test/Owner settings.
+- Added gate regression tests to both Linux and macOS CI.
+- Same-user direct Git remains outside the v0.2 enforcement boundary.
+
 ## 0.1.1 — 2026-10-08
 
 Fixes from an independent review of 0.1.
