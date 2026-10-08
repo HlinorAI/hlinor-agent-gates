@@ -13,6 +13,11 @@
 - Signature tests report SKIP when ssh-keygen is unavailable.
 - Same-user direct Git remains outside the v0.2 enforcement boundary.
 
+### Known limitations
+
+- A branch can change `.agent-gates/config` and `bin/` in its diff; these changes are surfaced only in the diffstat and require review.
+- Run the CLI only from `<main>/.agent-gates/`. A copy in the author's worktree running under the same OS user is not trusted.
+
 ## 0.1.1 — 2026-10-08
 
 Fixes from an independent review of 0.1.
