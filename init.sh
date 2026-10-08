@@ -16,7 +16,7 @@
 #   --dry-run             print what would happen, change nothing
 set -euo pipefail
 
-VERSION="0.1.1"
+VERSION="0.2.0"
 KIT="$(cd "$(dirname "$0")" && pwd)"
 die() { echo "ERROR: $*" >&2; exit 1; }
 say() { echo "• $*"; }
@@ -49,6 +49,14 @@ WT_ROOT="${WT_ROOT:-$REPO-wt}"; BACKUP_DIR="${BACKUP_DIR:-$REPO/backups}"
 IFS=',' read -r -a AGENT_LIST <<< "$AGENTS"
 for a in "${AGENT_LIST[@]}"; do [[ "$a" =~ ^[a-z0-9-]+$ ]] || die "agent name '$a': a-z 0-9 - only"; done
 command -v python3 >/dev/null || die "python3 is required"
+python3 - <<'VERSION_CHECK'
+import re, subprocess, sys
+version = re.search(r"(\d+)\.(\d+)", subprocess.check_output(["git", "--version"], text=True))
+if not version or tuple(map(int, version.groups())) < (2, 38):
+    print("DENY GIT_TOO_OLD: Git 2.38 or later is required")
+    sys.exit(1)
+VERSION_CHECK
+
 
 # --- lock backend -------------------------------------------------------------
 # Linux: chattr +i (root). macOS: chflags uchg (file owner or root).
@@ -168,12 +176,16 @@ for i in "${!DOC_DST[@]}"; do render "${DOC_SRC[$i]}" "${DOC_DST[$i]}"; done
 mkdir "$REPO/.agent-gates"
 install -m 755 "$KIT/templates/add_agent.sh" "$REPO/.agent-gates/add_agent.sh"
 install -m 755 "$KIT/templates/backup.sh"    "$REPO/.agent-gates/backup.sh"
-cat > "$REPO/.agent-gates/config" <<EOF
-# written by hlinor-agent-gates $VERSION
-MAIN_BRANCH="$MAIN_BRANCH"
-WT_ROOT="$WT_ROOT"
-BACKUP_DIR="$BACKUP_DIR"
-EOF
+install -m 755 "$KIT/bin/agent-gates" "$REPO/.agent-gates/agent-gates"
+install -m 644 "$KIT/bin/agent_gates.py" "$REPO/.agent-gates/agent_gates.py"
+MAIN_BRANCH="$MAIN_BRANCH" WT_ROOT="$WT_ROOT" BACKUP_DIR="$BACKUP_DIR" \
+TEST_CMD="$TEST_CMD" OWNER_NAME="$OWNER" python3 - "$REPO/.agent-gates/config" <<'CONFIG'
+import os, shlex, sys
+with open(sys.argv[1], "x") as stream:
+    for key in ("MAIN_BRANCH", "WT_ROOT", "BACKUP_DIR", "TEST_CMD", "OWNER_NAME"):
+        stream.write(key + "=" + shlex.quote(os.environ[key]) + "\n")
+    stream.write('ACCEPT_TTL_HOURS=24\nOWNER_SIGNING_KEY=""\n')
+CONFIG
 
 GI="$REPO/.gitignore"
 touch "$GI"

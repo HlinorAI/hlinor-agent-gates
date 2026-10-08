@@ -18,7 +18,7 @@ Rule zero: **no agent implements and approves its own work.**
 
 - Each agent works ONLY in `{{WT_ROOT}}/<name>` on branch `agent/<name>`.
 - Before starting a task: `git merge {{MAIN_BRANCH}}` in your worktree.
-- Never merge into `{{MAIN_BRANCH}}` yourself. Only the Git Agent merges, and only after Verifier ACCEPT and Owner acceptance.
+- Never merge into `{{MAIN_BRANCH}}` yourself. Only the Git Agent merges, through `.agent-gates/agent-gates merge <acceptance-id>`, after Verifier ACCEPT and Owner acceptance.
 - `{{MAIN_REPO}}` is not a workspace. No edits there.
 - New agent: `{{MAIN_REPO}}/.agent-gates/add_agent.sh <name>`.
 

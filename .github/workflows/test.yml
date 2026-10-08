@@ -16,3 +16,9 @@ jobs:
       - name: Tests (macOS)
         if: runner.os == 'macOS'
         run: bash tests/test_init.sh
+      - name: Gates (Linux)
+        if: runner.os == 'Linux'
+        run: bash tests/test_gates.sh
+      - name: Gates (macOS)
+        if: runner.os == 'macOS'
+        run: bash tests/test_gates.sh

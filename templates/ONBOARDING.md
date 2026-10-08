@@ -17,7 +17,7 @@ Confirm with: pwd && git branch --show-current
 
 ```
 You are the Verifier for agent/<author>. You did not write it.
-Follow VERIFIER.md step by step. Re-run the full test suite yourself; the author's report is a claim.
+Follow VERIFIER.md step by step. Run {{MAIN_REPO}}/.agent-gates/agent-gates verify agent/<author> --as <your-name>; the author's report is a claim.
 No edits. Output the verdict block from VERIFIER.md.
 ```
 
@@ -26,7 +26,7 @@ No edits. Output the verdict block from VERIFIER.md.
 ```
 Owner accepted <commit>, Verifier: ACCEPT.
 1. git -C {{MAIN_REPO}} status --short  → must be empty, otherwise stop and report.
-2. git -C {{MAIN_REPO}} merge --no-ff agent/<name> -m "Merge <summary> (Verifier: <who>, Owner: accepted)"
+2. {{MAIN_REPO}}/.agent-gates/agent-gates merge <acceptance-id>
 3. In {{MAIN_REPO}}: {{TEST_CMD}} → report the summary line.
 No push. Report git log --oneline -3.
 ```

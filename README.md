@@ -15,10 +15,10 @@ Coder ──► Verifier (a different agent) ──► Owner (you) ──► Git
 | | What | Enforced by |
 |---|---|---|
 | 1 | One worktree + branch per agent (`<repo>-wt/<name>`, `agent/<name>`) | git |
-| 2 | Roles: Coder / Verifier / Owner / Git Agent. Nobody approves their own work | `GIT_POLICY.md` |
+| 2 | Verifier differs from author; Owner accepts the tested result before merge | `agent-gates verify / accept / merge` |
 | 3 | Verifier checklist: re-run the **full** suite, compare test counts, check baseline, hunt fail-open defaults | `VERIFIER.md` |
 | 4 | Paths agents must never touch | **OS** (`chattr +i` on Linux, `chflags uchg` on macOS), write-tested, not a prompt |
-| 5 | One test command for everyone | `GIT_POLICY.md` |
+| 5 | One test command for everyone | `.agent-gates/config` + `GIT_POLICY.md` |
 | 6 | No push by agents; verified `git bundle` backups | policy + `.agent-gates/backup.sh` |
 
 ## Install
@@ -31,7 +31,7 @@ cd hlinor-agent-gates
   --protect /srv/exports/approved,/srv/sent-mail --require-locks
 ```
 
-Requirements: git ≥ 2.5, bash, python3. Path locks: Linux needs root + `chattr` on a filesystem that supports it (ext4, xfs); macOS uses `chflags uchg`.
+Requirements: git ≥ 2.38, bash, python3. Optional acceptance signing requires SSH signing support in `ssh-keygen`. Path locks: Linux needs root + `chattr` on a filesystem that supports it (ext4, xfs); macOS uses `chflags uchg`.
 
 Every lock is **write-tested** after it is applied, and the summary says `LOCKED` or `NOT LOCKED (advisory only)` per path. With `--require-locks`, a path that can't be locked aborts the install before anything else is written.
 
@@ -42,6 +42,56 @@ Then send each agent the message from `AGENT_ONBOARDING.md`. New agent later:
 ```bash
 .agent-gates/add_agent.sh manus
 ```
+
+## Verify, accept, merge (v0.2)
+
+After installation, run the installed CLI from any directory:
+
+```bash
+/path/to/repo/.agent-gates/agent-gates verify agent/codex --as claude
+/path/to/repo/.agent-gates/agent-gates accept <verification-id>
+/path/to/repo/.agent-gates/agent-gates merge <acceptance-id>
+/path/to/repo/.agent-gates/agent-gates status agent/codex
+```
+
+Verify tests a detached worktree of the **merge result**, with the current main
+and branch as parents. It also tests main as baseline; `--no-baseline` explicitly
+records a skipped baseline. Failed tests still produce a REJECT receipt.
+Every CLI copy reads policy only from the main checkout, including the test
+command; a worktree-local config cannot override it. Accept and merge reject a
+receipt with a different command using `TEST_CMD_MISMATCH`.
+Accept displays the author, verifier, commits, diffstat, test command and both summaries;
+type `yes` to accept, or use `--yes` for scripted use. Acceptance expires after
+24 hours by default. A new commit on either branch requires fresh verification.
+
+Merge checks the receipts, optional signature, expiry, both reviewed SHAs,
+clean main, exact merge tree and prior use. It prepares a no-fast-forward merge,
+checks the tree before committing, and records the merge. A hook that changes the committed tree causes the merge to be rolled back
+with `MERGE_RESULT_CHANGED`; existing Git hooks are retained. Gate refusals are one
+line `DENY <CODE>: <text>` with exit 1; usage/environment errors exit 2; successful
+commands exit 0. Main is not changed by a gate refusal.
+
+Receipts are canonical, content-addressed JSON in
+`<git-common-dir>/agent-gates/receipts/`, shared by every worktree and not tracked.
+The verification's `<id>.log` holds full merged-result test output;
+`<id>.baseline.log` holds baseline output. Each output hash is recorded.
+
+Configuration in `.agent-gates/config`:
+
+```bash
+TEST_CMD="python3 -m pytest tests -q"
+ACCEPT_TTL_HOURS=24
+OWNER_NAME="owner"
+OWNER_SIGNING_KEY=""
+```
+
+Empty `OWNER_SIGNING_KEY` means unsigned acceptances; status shows `UNSIGNED`.
+For signed acceptances, set the Owner's private key path and track
+`.agent-gates/allowed_signers` with a line such as
+`owner ssh-ed25519 <public-key>`. Signatures use namespace `agent-gates`.
+The signing payload is canonical acceptance JSON with `signature: null` and
+without `id`; both are added afterwards. Keep the private key outside agents'
+reach. Signing will be mandatory in the separate enforcement mode.
 
 ## Options
 
@@ -75,10 +125,12 @@ Be precise about this, because the name says "gates".
 |---|---|---|
 | Separate folder + branch per agent | ✅ git | |
 | Locked paths | ✅ OS flag, write-tested | if it shows `NOT LOCKED` |
-| Verifier ≠ author, Owner accepts, only Git Agent merges | | ⚠️ `GIT_POLICY.md` |
+| Verifier ≠ author, accepted exact merge tree, fresh refs, TTL, no receipt replay | ✅ through the v0.2 CLI | direct Git access can bypass the CLI |
+| Owner authenticity | ✅ SSH signature when enabled | unsigned acceptances; Verifier identity is supplied with `--as` |
+| Only Git Agent can move main | | ⚠️ separate OS users/clones are not part of v0.2 |
 | No push | | ⚠️ `GIT_POLICY.md` |
 
-Today an agent running as the same OS user as you **can** ignore the policy rows, and can remove a lock flag it is able to set. Worktrees share one `.git`, so any agent that can commit can also move `main`. Real enforcement needs agents in separate clones under separate OS users, with merges allowed only against an approval receipt bound to the reviewed commit SHA. That is v0.2.
+Today an agent running as the same OS user as you **can** ignore the policy rows, and can remove a lock flag it is able to set. Worktrees share one `.git`, so any agent that can commit can also move `main`. Real enforcement needs agents in separate clones under separate OS users, with merges allowed only against a signed approval receipt bound to the reviewed commit SHA. That enforcement mode is separate from v0.2; v0.2 supplies the receipts and CLI checks.
 
 ## What this is not
 
@@ -88,7 +140,8 @@ Today an agent running as the same OS user as you **can** ignore the policy rows
 ## Development
 
 ```bash
-tests/test_init.sh        # 26 checks: dirty tree, dry run, reinstall, no-overwrite, bad input, backups, locks
+bash tests/test_init.sh   # 26 installation checks
+bash tests/test_gates.sh  # 11 required gate scenarios + merge-result, signing, baseline, Git version
 ```
 
 ## License
