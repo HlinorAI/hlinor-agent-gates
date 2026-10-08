@@ -15,7 +15,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 
 class Deny(Exception):
@@ -222,6 +222,9 @@ class Gates:
             raise Deny("SELF_VERIFICATION", "verifier must differ from author")
         self.clean()
         base, head = git(self.repo, "rev-parse", "HEAD"), self.head(args.branch)
+        changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z", base, head).split("\0")
+        policy_files = sorted(path for path in changed if path == "init.sh" or
+                              path.startswith((".agent-gates/", "bin/")))
         tree = self.merge_tree(base, head)
         commit = git(self.repo, "commit-tree", tree, "-p", base, "-p", head,
                      "-m", "agent-gates temporary verification")
@@ -233,7 +236,8 @@ class Gates:
             "kind": "verification", "schema": 1, "repo": str(self.repo),
             "branch": args.branch, "author": author, "verifier": args.verifier,
             "base_sha": base, "head_sha": head, "merge_tree": tree,
-            "test_cmd": self.cfg["TEST_CMD"], "result": result, "baseline": baseline,
+            "test_cmd": self.cfg["TEST_CMD"], "policy_files_changed": policy_files,
+            "result": result, "baseline": baseline,
             "verdict": "ACCEPT" if result["exit"] == 0 else "REJECT",
             "created_at": stamp(), "tool_version": VERSION,
         }
@@ -242,6 +246,8 @@ class Gates:
         if baseline_output is not None:
             (self.directory / (record["id"] + ".baseline.log")).write_bytes(baseline_output)
         self.write(record)
+        if policy_files:
+            print("WARNING: branch changes gate policy: " + ", ".join(policy_files), file=sys.stderr)
         print(record["id"])
 
     @staticmethod
@@ -276,6 +282,9 @@ class Gates:
         print(git(self.repo, "diff", "--stat", verification["base_sha"], verification["head_sha"]))
         print("test_cmd: " + verification["test_cmd"] + "; tests: " + verification["result"]["summary"])
         print("baseline: " + verification["baseline"].get("summary", "SKIPPED"))
+        if verification.get("policy_files_changed"):
+            print("WARNING: branch changes gate policy: " +
+                  ", ".join(verification["policy_files_changed"]))
         if not args.yes and input("Accept this verification? Type yes: ").strip() != "yes":
             raise EnvironmentError_("acceptance not confirmed")
         # Owner may take time at the prompt; bind to current refs again before writing.

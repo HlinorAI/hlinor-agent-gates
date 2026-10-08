@@ -22,3 +22,5 @@ jobs:
       - name: Gates (macOS)
         if: runner.os == 'macOS'
         run: bash tests/test_gates.sh
+      - name: Automatic setup (Linux and macOS)
+        run: bash tests/test_setup.sh

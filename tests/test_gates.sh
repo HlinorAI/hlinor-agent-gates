@@ -251,6 +251,18 @@ PYCODE
     fake_acceptance &&
     deny TEST_CMD_MISMATCH "$cli" merge "$a"
 }
+t19() {
+  setup r19 || return 1
+  printf '# branch policy change\n' >> "$wt/.agent-gates/config"
+  git -C "$wt" add .agent-gates/config; git -C "$wt" commit -qm policy || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  v="$("$cli" verify agent/codex --as claude 2>"$T/policy-warning")" || return 1
+  [ "$(value "$receipts/verification-$v.json" policy_files_changed)" = "['.agent-gates/config']" ] &&
+    grep -qx 'WARNING: branch changes gate policy: .agent-gates/config' "$T/policy-warning" || return 1
+  output="$("$cli" accept "$v" --yes)" || return 1
+  [[ "$output" == *"WARNING: branch changes gate policy: .agent-gates/config"* ]] &&
+    [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
+}
 check "1 self verification" t1
 check "2 dirty main" t2
 check "3 rejected tests cannot be accepted" t3
@@ -269,5 +281,6 @@ check "old Git refused before effects" t15
 check "hook changed tree rolls back merge" t16
 check "worktree TEST_CMD override cannot approve failing tests" t17
 check "old mismatched runner refused at accept and merge" t18
+check "policy changes recorded and warned without denial" t19
 echo; echo "$pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ]

@@ -4,7 +4,8 @@
 #
 # usage: ./init.sh <repo> [options]
 #   --agents a,b,c        agent names (default: codex,claude)
-#   --test-cmd "cmd"      the one test command (default: python3 -m pytest tests -q)
+#   --test-cmd "cmd"      the one test command (default: fail closed)
+#   --from-defaults       read ~/.agent-gates/defaults; explicit flags override
 #   --protect p1,p2       absolute paths to lock immutable (default: none)
 #   --require-locks       abort (changing nothing) if any path cannot be locked
 #   --owner NAME          Owner (default: owner)
@@ -16,7 +17,7 @@
 #   --dry-run             print what would happen, change nothing
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 KIT="$(cd "$(dirname "$0")" && pwd)"
 die() { echo "ERROR: $*" >&2; exit 1; }
 say() { echo "• $*"; }
@@ -24,10 +25,38 @@ say() { echo "• $*"; }
 [ $# -ge 1 ] || { sed -n '2,18p' "$0"; exit 1; }
 [ -d "$1" ] || die "no such directory: $1"
 REPO="$(cd "$1" && pwd -P)"; shift   # -P: macOS /tmp and /var are symlinks
-AGENTS="codex,claude"; TEST_CMD="python3 -m pytest tests -q"; PROTECT=""; REQUIRE_LOCKS=0
+AGENTS="codex,claude"; TEST_CMD=""; PROTECT=""; REQUIRE_LOCKS=0
 OWNER="owner"; GIT_AGENT=""; ORCH=""; PUBLISHER=""; WT_ROOT=""; BACKUP_DIR=""; DRY=0
+# Load defaults first so explicit flags override regardless of their position.
+for option in "$@"; do
+  if [ "$option" = --from-defaults ]; then
+    defaults_assignments="$(python3 - "$HOME/.agent-gates/defaults" <<'DEFAULTS'
+import pathlib, shlex, sys
+path = pathlib.Path(sys.argv[1])
+if not path.is_file():
+    sys.exit('ERROR: missing defaults: ' + str(path))
+values = {}
+for line in path.read_text().splitlines():
+    if not line.strip() or line.lstrip().startswith('#'):
+        continue
+    key, separator, value = line.partition('=')
+    if not separator or key not in ('AGENTS', 'OWNER_NAME', 'TEST_CMD'):
+        sys.exit('ERROR: invalid defaults assignment')
+    parts = shlex.split(value, comments=True)
+    if len(parts) != 1:
+        sys.exit('ERROR: invalid defaults value')
+    values[key] = parts[0]
+for key, value in values.items():
+    print(('OWNER' if key == 'OWNER_NAME' else key) + '=' + shlex.quote(value))
+DEFAULTS
+)" || exit 1
+    eval "$defaults_assignments"
+    break
+  fi
+done
 while [ $# -gt 0 ]; do
   case "$1" in
+    --from-defaults) shift;;
     --agents) AGENTS="$2"; shift 2;;
     --test-cmd) TEST_CMD="$2"; shift 2;;
     --protect) PROTECT="$2"; shift 2;;
@@ -43,6 +72,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ -z "$TEST_CMD" ]; then
+  TEST_CMD="echo 'agent-gates: TEST_CMD not configured' >&2; exit 1"
+fi
 FIRST="${AGENTS%%,*}"
 GIT_AGENT="${GIT_AGENT:-$FIRST}"; ORCH="${ORCH:-$FIRST}"; PUBLISHER="${PUBLISHER:-$OWNER}"
 WT_ROOT="${WT_ROOT:-$REPO-wt}"; BACKUP_DIR="${BACKUP_DIR:-$REPO/backups}"
@@ -129,6 +161,8 @@ if [ -n "$PROTECT" ]; then
   fi
 fi
 
+python3 "$KIT/scripts/instructions.py" --check "$REPO" "$WT_ROOT" "$MAIN_BRANCH"
+
 echo "hlinor-agent-gates $VERSION → $REPO"
 say "main branch: $MAIN_BRANCH   worktrees: $WT_ROOT/{${AGENTS}}"
 say "roles: orchestrator=$ORCH git-agent=$GIT_AGENT owner=$OWNER publisher=$PUBLISHER"
@@ -192,7 +226,8 @@ touch "$GI"
 [ -s "$GI" ] && [ "$(tail -c1 "$GI")" != "" ] && echo >> "$GI"
 for line in "backups/" "*.orig" "__pycache__/"; do grep -qxF "$line" "$GI" || echo "$line" >> "$GI"; done
 
-git -C "$REPO" add .gitignore .agent-gates "${DOC_DST[@]}"
+python3 "$KIT/scripts/instructions.py" "$REPO" "$WT_ROOT" "$MAIN_BRANCH"
+git -C "$REPO" add .gitignore .agent-gates "${DOC_DST[@]}" AGENTS.md CLAUDE.md GEMINI.md
 git -C "$REPO" commit -q -m "Add hlinor-agent-gates $VERSION: roles, worktrees, verifier checklist"
 say "committed $(git -C "$REPO" rev-parse --short HEAD)"
 
