@@ -280,6 +280,17 @@ assert time.monotonic()-float(sys.argv[2]) < 10
 PYTEST
   [ "$?" = 0 ] && [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
 }
+t21() {
+  setup r21 || return 1
+  echo "# changed test collection" > "$wt/conftest.py"
+  git -C "$wt" add conftest.py; git -C "$wt" commit -qm collection || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  verify || return 1
+  [ "$(value "$receipts/verification-$v.json" test_files_changed)" = "['conftest.py']" ] || return 1
+  output="$("$cli" accept "$v" --yes)" || return 1
+  [[ "$output" == *"WARNING: branch changes tests: conftest.py"* ]] &&
+    [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
+}
 check "1 self verification" t1
 check "2 dirty main" t2
 check "3 rejected tests cannot be accepted" t3
@@ -300,5 +311,6 @@ check "worktree TEST_CMD override cannot approve failing tests" t17
 check "old mismatched runner refused at accept and merge" t18
 check "policy changes recorded and warned without denial" t19
 check "test timeout rejects within ten seconds" t20
+check "changed tests recorded and warned" t21
 echo; echo "$pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ]

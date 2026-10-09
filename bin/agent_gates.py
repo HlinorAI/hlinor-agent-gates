@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
@@ -248,6 +249,12 @@ class Gates:
         changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z", base, head).split("\0")
         policy_files = sorted(path for path in changed if path == "init.sh" or
                               path.startswith((".agent-gates/", "bin/")))
+        test_files = sorted(path for path in changed if path and (
+            path.startswith("tests/") or any(part == "tests" for part in Path(path).parts) or
+            fnmatch.fnmatchcase(Path(path).name, "test_*") or
+            fnmatch.fnmatchcase(Path(path).name, "*_test.*") or
+            Path(path).name in {"conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg",
+                                "tox.ini", "package.json"}))
         tree = self.merge_tree(base, head)
         commit = git(self.repo, "commit-tree", tree, "-p", base, "-p", head,
                      "-m", "agent-gates temporary verification")
@@ -260,6 +267,7 @@ class Gates:
             "branch": args.branch, "author": author, "verifier": args.verifier,
             "base_sha": base, "head_sha": head, "merge_tree": tree,
             "test_cmd": self.cfg["TEST_CMD"], "policy_files_changed": policy_files,
+            "test_files_changed": test_files,
             "result": result, "baseline": baseline,
             "verdict": "ACCEPT" if result["exit"] == 0 else "REJECT",
             "created_at": stamp(), "tool_version": VERSION,
@@ -308,6 +316,8 @@ class Gates:
         if verification.get("policy_files_changed"):
             print("WARNING: branch changes gate policy: " +
                   ", ".join(verification["policy_files_changed"]))
+        if verification.get("test_files_changed"):
+            print("WARNING: branch changes tests: " + ", ".join(verification["test_files_changed"]))
         if not args.yes and input("Accept this verification? Type yes: ").strip() != "yes":
             raise EnvironmentError_("acceptance not confirmed")
         # Owner may take time at the prompt; bind to current refs again before writing.
