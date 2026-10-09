@@ -346,6 +346,19 @@ t25() {
     [ "$(value "$receipts/verification-$v.json" test_files_changed)" = "[]" ] &&
     accept && [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
 }
+t26() {
+  setup r26 || return 1
+  printf '%s\n' 'if [ -f feature ]; then echo "1 passed"; else sleep 30; fi' > "$r/check.sh"
+  printf 'TEST_TIMEOUT_SECONDS=2\n' >> "$r/.agent-gates/config"
+  git -C "$r" add check.sh .agent-gates/config; git -C "$r" commit -qm baseline-timeout || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  verify || return 1
+  [ "$(value "$receipts/verification-$v.json" result.exit)" = 0 ] &&
+    [ "$(value "$receipts/verification-$v.json" baseline.exit)" = 124 ] &&
+    [ "$(value "$receipts/verification-$v.json" verdict)" = REJECT ] &&
+    [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] &&
+    deny NOT_ACCEPTED_BY_VERIFIER "$cli" accept "$v" --yes
+}
 check "1 self verification" t1
 check "2 dirty main" t2
 check "3 rejected tests cannot be accepted" t3
@@ -371,5 +384,6 @@ check "policy deny requires explicit recorded override at accept and merge" t22
 check "policy warn preserves acceptance without override" t23
 check "risk threshold and lockfiles displayed to Owner" t24
 check "main-only policy and test edits do not cause branch warnings" t25
+check "baseline-only timeout also rejects acceptance" t26
 echo; echo "$pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ]

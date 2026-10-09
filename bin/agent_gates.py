@@ -296,7 +296,7 @@ class Gates:
             "test_cmd": self.cfg["TEST_CMD"], "policy_files_changed": policy_files,
             "test_files_changed": test_files, "risk": risk,
             "result": result, "baseline": baseline,
-            "verdict": "ACCEPT" if result["exit"] == 0 else "REJECT",
+            "verdict": "ACCEPT" if result["exit"] == 0 and not baseline.get("timed_out") else "REJECT",
             "created_at": stamp(), "tool_version": VERSION,
         }
         record["id"] = receipt_id(record)
