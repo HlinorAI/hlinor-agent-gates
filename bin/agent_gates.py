@@ -491,7 +491,7 @@ def main():
         # Validate before importing project-controlled Python into a root process.
         if sys.argv[1:3] == ["enforce", "init"]:
             paths = [source / name for name in
-                     ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run")]
+                     ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py")]
             paths += [source, *source.parents]
             trusted = (source.name == "bin" and ".agent-gates" not in source.parts
                        and ".agent-gates" not in Path(__file__).absolute().parts

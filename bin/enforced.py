@@ -4,6 +4,8 @@ import argparse
 import fcntl
 import grp
 import hashlib
+import importlib.util
+from types import SimpleNamespace
 import json
 import os
 from pathlib import Path
@@ -178,7 +180,7 @@ def init(repo_arg, agent_names):
     # Also guard direct invocation of this helper, before any provisioning.
     source = Path(__file__).resolve().parent
     paths = [source / name for name in
-             ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run")]
+             ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py")]
     paths += [source, *source.parents]
     trusted = (source.name == "bin" and ".agent-gates" not in source.parts
                and ".agent-gates" not in Path(__file__).absolute().parts
@@ -233,7 +235,7 @@ def init(repo_arg, agent_names):
     secure_dir(CODE / "bin", 0, 0, 0o755)
     source = Path(__file__).resolve().parent
     hashes = {}
-    for name in ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run"):
+    for name in ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py"):
         path = source / name
         if not path.is_file() or path.is_symlink():
             deny("MISSING_DEPENDENCY", "trusted kit file missing: " + name)
@@ -277,6 +279,12 @@ def init(repo_arg, agent_names):
     run("git", "--git-dir", str(bare), "config", "core.sharedRepository", "0640")
     hook = bare / "hooks/pre-receive"
     shutil.copyfile(CODE / "bin/pre-receive", hook)
+    # Git may chmod a newly created object directory and drop its setgid bit
+    # because the gate is intentionally not a member of the agents group.
+    # Provision every fan-out directory as root so later objects inherit agents.
+    for prefix in range(256):
+        (bare / "objects" / format(prefix, "02x")).mkdir(exist_ok=True)
+    (bare / "refs/heads/agent").mkdir(exist_ok=True)
     for directory, dirs, files in os.walk(bare):
         os.chown(directory, gate.pw_uid, agents.gr_gid); os.chmod(directory, 0o2750)
         for filename in files:
@@ -457,8 +465,15 @@ def main(argv=None):
             parser.add_argument("--agents", default="codex,claude,zcode")
             args = parser.parse_args(argv[2:])
             return init(args.repo, args.agents)
-        deny("ENFORCED_PHASE_NOT_IMPLEMENTED", "enforced verify/accept/merge/status are unavailable until phase B")
-    except (Refusal, OSError, ValueError, KeyError) as exc:
+        if argv and argv[0] in ("verify", "accept", "merge", "status", "runner"):
+            if Path(__file__).resolve().parent != CODE / "bin":
+                deny("UNTRUSTED_SOURCE", "use the installed /opt/agent-gates/bin/agent-gates")
+            spec = importlib.util.spec_from_file_location("enforced_runtime", CODE / "bin/enforced_runtime.py")
+            runtime = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(runtime)
+            return runtime.main(argv, SimpleNamespace(**globals()))
+        deny("INVALID_ARGUMENT", "unknown enforced command")
+    except (Refusal, OSError, ValueError, KeyError, TypeError, EOFError, subprocess.TimeoutExpired) as exc:
         message = str(exc)
         if not message.startswith("DENY "):
             message = "DENY NOT_ENFORCED: " + message
