@@ -2,6 +2,8 @@
 
 ## 0.3.1 — 2026-10-09
 
+- Fixed policy classification for installed projects: protect gate files and policy/checklist documents, allow ordinary bin/ and init.sh edits; optional POLICY_PATHS globs extend the protected paths.
+
 - Test runs use isolated process groups and a configurable 1800-second deadline; timeout records exit 124 and REJECT.
 - Receipts record changed test files; accept warns about collection and test configuration edits.
 - BREAKING: policy changes default to deny and require Owner `--allow-policy-change`; acceptances record the override and merge rechecks it.

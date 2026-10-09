@@ -134,8 +134,12 @@ remaining in that group are also cleaned up when the test command exits.
 Every CLI copy reads policy only from the main checkout, including the test
 command; a worktree-local config cannot override it. Accept and merge reject a
 receipt with a different command using `TEST_CMD_MISMATCH`.
-Verify records `policy_files_changed` and warns for changes under `.agent-gates/`,
-`bin/` or to `init.sh`. With `POLICY_CHANGES=deny` (default), accept refuses them
+Verify records `policy_files_changed` and warns for changes under `.agent-gates/`
+or to root `GIT_POLICY.md`, `GIT_POLICY.agent-gates.md`, `VERIFIER.md` and
+`VERIFIER.agent-gates.md`. Optional `POLICY_PATHS` adds space-separated globs
+matched against repository-relative paths (for example `ops/*.sh docs/security.md`).
+Project `bin/` and `init.sh` are ordinary user code unless explicitly matched by
+`POLICY_PATHS`. With `POLICY_CHANGES=deny` (default), accept refuses them
 with `POLICY_CHANGE_REQUIRES_OVERRIDE` unless the Owner explicitly uses
 `accept <id> --allow-policy-change`. This boolean is bound into the acceptance
 receipt and signature, and merge rechecks it against main's current policy and
@@ -171,6 +175,7 @@ TEST_CMD="python3 -m pytest tests -q"
 ACCEPT_TTL_HOURS=24
 TEST_TIMEOUT_SECONDS=1800
 POLICY_CHANGES=deny
+POLICY_PATHS=""
 OWNER_NAME="owner"
 OWNER_SIGNING_KEY=""
 ```
@@ -237,7 +242,7 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for the trust boundary and bypasses.
 ```bash
 bash tests/test_init.sh   # 28 installation/recovery checks
 bash tests/test_setup.sh  # 15 scenarios; isolated HOME and global Git config
-bash tests/test_gates.sh  # 26 gate checks, including timeouts, policy override and risk
+bash tests/test_gates.sh  # 29 gate checks, including timeouts, policy override and risk
 ```
 
 ## License

@@ -18,9 +18,15 @@ is not trusted. Verification executes branch code with the caller's OS permissio
 | Evidence | Canonical receipt ids, hashes, fresh base/head, merge-tree comparison, TTL and replay checks | Unsigned evidence is not authenticated against an actor who can rewrite it |
 | Identity | Verifier name differs from author name | `--as` is supplied identity, not proof of independent execution |
 | Acceptance | Optional SSH signature in namespace agent-gates | Key and allowed-signers/main policy must remain trustworthy; unsigned acceptance is not Owner authentication |
-| Policy edits | Default deny; explicit recorded override, rechecked by merge | Only `.agent-gates/`, `bin/`, `init.sh` match this classifier; warn mode permits acceptance without override |
+| Policy edits | Default deny; explicit recorded override, rechecked by merge | Only `.agent-gates/**`, root `GIT_POLICY.md`, `GIT_POLICY.agent-gates.md`, `VERIFIER.md`, `VERIFIER.agent-gates.md` and optional space-separated `POLICY_PATHS` globs match this classifier; warn mode permits acceptance without override |
 | Review signals | Test-file warnings, LARGE_DIFF and LOCKFILE labels | Signals do not prove safety or block these risks by themselves |
 | Installation | Common-dir flock between installers; cleanup of installer-created worktrees/branches on failure | Cooperating installers only; install commit remains and may need recovery |
+
+Project `bin/` and `init.sh` contain user code and require no policy override unless
+the Owner includes them in `POLICY_PATHS` in main's config. Additional globs extend
+the fixed policy paths; they do not replace them. Classification is shared by
+verify and the accept/merge gate, which recomputes it from bound refs and current
+main config instead of trusting legacy receipt path lists.
 
 ## Policy rules
 

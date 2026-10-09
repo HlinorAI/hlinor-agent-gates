@@ -208,14 +208,22 @@ class Gates:
         if verification["test_cmd"] != self.cfg["TEST_CMD"]:
             raise Deny("TEST_CMD_MISMATCH", "verification test command differs from main config")
 
-    def policy_change_gate(self, verification, allowed=False):
-        # Recompute from bound refs so legacy/missing metadata cannot bypass the gate.
+    def policy_files(self, base, head):
         changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z",
-                      verification["base_sha"] + "..." + verification["head_sha"]).split("\0")
-        policy_changed = verification.get("policy_files_changed") or any(
-            path == "init.sh" or path.startswith((".agent-gates/", "bin/")) for path in changed)
-        if self.cfg["POLICY_CHANGES"] == "deny" and policy_changed and allowed is not True:
+                      base + "..." + head).split("\0")
+        fixed = {"GIT_POLICY.md", "GIT_POLICY.agent-gates.md", "VERIFIER.md",
+                 "VERIFIER.agent-gates.md"}
+        patterns = self.cfg.get("POLICY_PATHS", "").split()
+        return sorted(path for path in changed if path and (
+            path.startswith(".agent-gates/") or path in fixed or
+            any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)))
+
+    def policy_change_gate(self, verification, allowed=False):
+        # Trusted main config and bound refs define policy, not legacy receipt metadata.
+        policy_files = self.policy_files(verification["base_sha"], verification["head_sha"])
+        if self.cfg["POLICY_CHANGES"] == "deny" and policy_files and allowed is not True:
             raise Deny("POLICY_CHANGE_REQUIRES_OVERRIDE", "accept requires --allow-policy-change")
+        return policy_files
 
     def test(self, commit):
         with tempfile.TemporaryDirectory(prefix="agent-gates-test-") as temp:
@@ -259,8 +267,7 @@ class Gates:
         self.clean()
         base, head = git(self.repo, "rev-parse", "HEAD"), self.head(args.branch)
         changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z", base + "..." + head).split("\0")
-        policy_files = sorted(path for path in changed if path == "init.sh" or
-                              path.startswith((".agent-gates/", "bin/")))
+        policy_files = self.policy_files(base, head)
         test_files = sorted(path for path in changed if path and (
             path.startswith("tests/") or any(part == "tests" for part in Path(path).parts) or
             fnmatch.fnmatchcase(Path(path).name, "test_*") or
@@ -335,15 +342,14 @@ class Gates:
         self.verdict(verification)
         self.test_command(verification)
         self.fresh(verification)
-        self.policy_change_gate(verification, args.allow_policy_change)
+        policy_files = self.policy_change_gate(verification, args.allow_policy_change)
         print("author: " + verification["author"] + "; verifier: " + verification["verifier"])
         print(git(self.repo, "log", "--oneline", verification["base_sha"] + ".." + verification["head_sha"]))
         print(git(self.repo, "diff", "--stat", verification["base_sha"], verification["head_sha"]))
         print("test_cmd: " + verification["test_cmd"] + "; tests: " + verification["result"]["summary"])
         print("baseline: " + verification["baseline"].get("summary", "SKIPPED"))
-        if verification.get("policy_files_changed"):
-            print("WARNING: branch changes gate policy: " +
-                  ", ".join(verification["policy_files_changed"]))
+        if policy_files:
+            print("WARNING: branch changes gate policy: " + ", ".join(policy_files))
         if verification.get("test_files_changed"):
             print("WARNING: branch changes tests: " + ", ".join(verification["test_files_changed"]))
         if verification.get("risk"):

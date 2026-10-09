@@ -237,7 +237,7 @@ import os, shlex, sys
 with open(sys.argv[1], "x") as stream:
     for key in ("MAIN_BRANCH", "WT_ROOT", "BACKUP_DIR", "TEST_CMD", "OWNER_NAME"):
         stream.write(key + "=" + shlex.quote(os.environ[key]) + "\n")
-    stream.write('ACCEPT_TTL_HOURS=24\nTEST_TIMEOUT_SECONDS=1800\nPOLICY_CHANGES=deny\nOWNER_SIGNING_KEY=""\n')
+    stream.write('ACCEPT_TTL_HOURS=24\nTEST_TIMEOUT_SECONDS=1800\nPOLICY_CHANGES=deny\nPOLICY_PATHS=""\nOWNER_SIGNING_KEY=""\n')
 CONFIG
 
 GI="$REPO/.gitignore"

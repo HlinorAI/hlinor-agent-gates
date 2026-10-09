@@ -337,10 +337,9 @@ PYTEST
 }
 t25() {
   setup r25 || return 1
-  mkdir -p "$r/bin"
-  echo "# main policy only" > "$r/bin/main-policy.py"
+  echo "# main policy only" >> "$r/GIT_POLICY.md"
   echo "# main test only" > "$r/conftest.py"
-  git -C "$r" add bin/main-policy.py conftest.py; git -C "$r" commit -qm main-only || return 1
+  git -C "$r" add GIT_POLICY.md conftest.py; git -C "$r" commit -qm main-only || return 1
   before="$(git -C "$r" rev-parse HEAD)"
   verify && [ "$(value "$receipts/verification-$v.json" policy_files_changed)" = "[]" ] &&
     [ "$(value "$receipts/verification-$v.json" test_files_changed)" = "[]" ] &&
@@ -358,6 +357,38 @@ t26() {
     [ "$(value "$receipts/verification-$v.json" verdict)" = REJECT ] &&
     [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] &&
     deny NOT_ACCEPTED_BY_VERIFIER "$cli" accept "$v" --yes
+}
+t27() {
+  setup r27 || return 1
+  mkdir -p "$wt/bin"
+  echo "# ordinary project tool" > "$wt/bin/tool.sh"
+  echo "# ordinary project installer" > "$wt/init.sh"
+  git -C "$wt" add bin/tool.sh init.sh; git -C "$wt" commit -qm user-code || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  verify && [ "$(value "$receipts/verification-$v.json" policy_files_changed)" = "[]" ] &&
+    accept && [ "$(value "$receipts/acceptance-$a.json" allow_policy_change)" = False ] &&
+    [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] && "$cli" merge "$a"
+}
+t28() {
+  setup r28 || return 1
+  echo "# branch policy edit" >> "$wt/GIT_POLICY.md"
+  git -C "$wt" add GIT_POLICY.md; git -C "$wt" commit -qm policy || return 1
+  verify && [ "$(value "$receipts/verification-$v.json" policy_files_changed)" = "['GIT_POLICY.md']" ] &&
+    deny POLICY_CHANGE_REQUIRES_OVERRIDE "$cli" accept "$v" --yes &&
+    fake_acceptance && deny POLICY_CHANGE_REQUIRES_OVERRIDE "$cli" merge "$a"
+}
+t29() {
+  setup r29 || return 1
+  printf 'POLICY_PATHS="ops/*.sh docs/*.md"\n' >> "$r/.agent-gates/config"
+  git -C "$r" add .agent-gates/config; git -C "$r" commit -qm custom-policy || return 1
+  git -C "$wt" merge -q main || return 1
+  mkdir -p "$wt/ops" "$wt/docs"
+  echo guarded > "$wt/ops/deploy.sh"; echo guarded > "$wt/docs/security.md"
+  echo unguarded > "$wt/ops/note.txt"
+  git -C "$wt" add ops docs; git -C "$wt" commit -qm guarded-files || return 1
+  verify && [ "$(value "$receipts/verification-$v.json" policy_files_changed)" = "['docs/security.md', 'ops/deploy.sh']" ] &&
+    deny POLICY_CHANGE_REQUIRES_OVERRIDE "$cli" accept "$v" --yes &&
+    fake_acceptance && deny POLICY_CHANGE_REQUIRES_OVERRIDE "$cli" merge "$a"
 }
 check "1 self verification" t1
 check "2 dirty main" t2
@@ -385,5 +416,8 @@ check "policy warn preserves acceptance without override" t23
 check "risk threshold and lockfiles displayed to Owner" t24
 check "main-only policy and test edits do not cause branch warnings" t25
 check "baseline-only timeout also rejects acceptance" t26
+check "ordinary bin tool and init script accept without override" t27
+check "installed GIT_POLICY edit requires override at accept and merge" t28
+check "additional space-separated POLICY_PATHS globs require override" t29
 echo; echo "$pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ]
