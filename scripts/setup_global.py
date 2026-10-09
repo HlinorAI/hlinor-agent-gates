@@ -46,6 +46,10 @@ def main():
     rules = [home / '.claude/CLAUDE.md',
              Path(os.environ.get('CODEX_HOME', str(home / '.codex'))) / 'AGENTS.md',
              home / '.gemini/GEMINI.md']
+    if args.root is None and (target / "roots").exists():
+        roots = [line for line in (target / "roots").read_text().splitlines() if line]
+    if not args.uninstall and not roots:
+        print("WARNING: no roots configured, auto-install disabled", file=sys.stderr)
     if args.dry_run:
         print(('Uninstall' if args.uninstall else 'Install') + ' agent-gates: ' + str(target))
         print('init.templateDir: ' + str(template))

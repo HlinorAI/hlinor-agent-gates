@@ -211,7 +211,7 @@ class Gates:
     def policy_change_gate(self, verification, allowed=False):
         # Recompute from bound refs so legacy/missing metadata cannot bypass the gate.
         changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z",
-                      verification["base_sha"], verification["head_sha"]).split("\0")
+                      verification["base_sha"] + "..." + verification["head_sha"]).split("\0")
         policy_changed = verification.get("policy_files_changed") or any(
             path == "init.sh" or path.startswith((".agent-gates/", "bin/")) for path in changed)
         if self.cfg["POLICY_CHANGES"] == "deny" and policy_changed and allowed is not True:
@@ -258,7 +258,7 @@ class Gates:
             raise Deny("SELF_VERIFICATION", "verifier must differ from author")
         self.clean()
         base, head = git(self.repo, "rev-parse", "HEAD"), self.head(args.branch)
-        changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z", base, head).split("\0")
+        changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z", base + "..." + head).split("\0")
         policy_files = sorted(path for path in changed if path == "init.sh" or
                               path.startswith((".agent-gates/", "bin/")))
         test_files = sorted(path for path in changed if path and (

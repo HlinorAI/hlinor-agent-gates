@@ -335,6 +335,17 @@ PYTEST
   [[ "$output" == *"HIGH_RISK: LARGE_DIFF, LOCKFILE"* ]] &&
     [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
 }
+t25() {
+  setup r25 || return 1
+  mkdir -p "$r/bin"
+  echo "# main policy only" > "$r/bin/main-policy.py"
+  echo "# main test only" > "$r/conftest.py"
+  git -C "$r" add bin/main-policy.py conftest.py; git -C "$r" commit -qm main-only || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  verify && [ "$(value "$receipts/verification-$v.json" policy_files_changed)" = "[]" ] &&
+    [ "$(value "$receipts/verification-$v.json" test_files_changed)" = "[]" ] &&
+    accept && [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
+}
 check "1 self verification" t1
 check "2 dirty main" t2
 check "3 rejected tests cannot be accepted" t3
@@ -359,5 +370,6 @@ check "changed tests recorded and warned" t21
 check "policy deny requires explicit recorded override at accept and merge" t22
 check "policy warn preserves acceptance without override" t23
 check "risk threshold and lockfiles displayed to Owner" t24
+check "main-only policy and test edits do not cause branch warnings" t25
 echo; echo "$pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ]
