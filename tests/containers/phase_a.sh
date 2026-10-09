@@ -34,12 +34,21 @@ printf 'PASS untrusted cooperative source rejected before execution or installat
 printf '#!/bin/sh\ntouch /tmp/fsmonitor-ran\n' > /tmp/evil-fsmonitor
 chmod +x /tmp/evil-fsmonitor
 git config core.fsmonitor /tmp/evil-fsmonitor
+printf '#!/bin/sh\ntouch /tmp/clean-filter-ran\ncat\n' > /tmp/evil-clean
+chmod +x /tmp/evil-clean
+git config filter.x.clean /tmp/evil-clean
+# Deliberately uncommitted: init must not inspect or import the working tree.
+printf 'message.txt filter=x\n' > .gitattributes
+printf 'dirty\n' > message.txt
 bash /trusted-kit/bin/agent-gates enforce init /tmp/project --agents codex,claude,zcode > /tmp/enforce-init.log 2>&1 || { cat /tmp/enforce-init.log; exit 1; }
 test ! -e /tmp/fsmonitor-ran
 test "$(git -c core.fsmonitor=false rev-parse HEAD)" = "$base"
 ! grep -q 'untrusted-module-ran' /opt/agent-gates/bin/enforced.py
 git -c core.fsmonitor=false config --unset core.fsmonitor
 printf 'PASS source Git fsmonitor ignored and main unchanged\n'
+test ! -e /tmp/clean-filter-ran
+test "$(git --git-dir=/srv/agent-gates/project.git show main:message.txt)" = ready
+printf 'PASS clean filter not executed and only committed main imported\n'
 /opt/agent-gates/bin/agent-gates doctor project > /tmp/doctor.log 2>&1 || { cat /tmp/doctor.log; exit 1; }
 test "$(git --git-dir=/srv/agent-gates/project.git rev-parse main)" = "$base"
 visudo -c > /tmp/visudo.log
@@ -86,4 +95,4 @@ if /opt/agent-gates/bin/agent-gates doctor project >/tmp/root-cli-doctor.log 2>&
 kill "$impostor"; wait "$impostor" || true
 grep -q 'NOT ENFORCED no agent CLI running as root' /tmp/root-cli-doctor.log
 printf 'PASS doctor rejects root agent CLI\n'
-printf '10 passed, 0 failed (phase A container smoke)\n'
+printf '11 passed, 0 failed (phase A container smoke)\n'

@@ -201,9 +201,7 @@ def init(repo_arg, agent_names):
     project = project_name(repo.name.removesuffix(".git"))
     agent_names = names(agent_names)
     if git(repo, "rev-parse", "--show-toplevel") != str(repo) or git(repo, "branch", "--show-current") != "main":
-        deny("INVALID_REPOSITORY", "clean main checkout required")
-    if git(repo, "status", "--porcelain"):
-        deny("MAIN_DIRTY", "commit or stash before enforcement")
+        deny("INVALID_REPOSITORY", "main checkout required")
     base = git(repo, "rev-parse", "main")
     manifest_path = CODE / "projects" / (project + ".json")
     if manifest_path.exists():

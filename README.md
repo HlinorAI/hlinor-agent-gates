@@ -248,3 +248,17 @@ bash tests/test_gates.sh  # 29 gate checks, including timeouts, policy override 
 ## License
 
 MIT. Built and used in production at [Hlinor](https://hlinor.com).
+
+## Enforced mode (Linux)
+
+Run `enforce init` only from a root-owned kit checkout whose files and directories
+are not writable by group or others, verified against the release tag, for example:
+
+```bash
+/root/agent-gates-kit/bin/agent-gates enforce init /path/to/project --agents codex,claude,zcode
+```
+
+Never run it from a project's `.agent-gates/`. `UNTRUSTED_SOURCE` prevents loading
+a substituted `enforced.py`; it cannot protect you from a substituted
+`agent_gates.py` entry point. The Owner must verify the kit before running it as root.
+Initialization imports only the committed `main`, ignoring dirty working-tree files.
