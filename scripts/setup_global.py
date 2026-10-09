@@ -46,6 +46,10 @@ def main():
     rules = [home / '.claude/CLAUDE.md',
              Path(os.environ.get('CODEX_HOME', str(home / '.codex'))) / 'AGENTS.md',
              home / '.gemini/GEMINI.md']
+    if args.root is None and (target / "roots").exists():
+        roots = [line for line in (target / "roots").read_text().splitlines() if line]
+    if not args.uninstall and not roots:
+        print("WARNING: no roots configured, auto-install disabled", file=sys.stderr)
     if args.dry_run:
         print(('Uninstall' if args.uninstall else 'Install') + ' agent-gates: ' + str(target))
         print('init.templateDir: ' + str(template))
@@ -65,7 +69,7 @@ def main():
     kit.mkdir(parents=True, exist_ok=True)
     # Copy distributable kit content only; never copy Git state or personal artifacts.
     for name in ('bin', 'templates', 'scripts', 'docs', 'tests', '.github',
-                 'init.sh', 'setup-global.sh', 'README.md', 'CHANGELOG.md', 'LICENSE'):
+                 'init.sh', 'setup-global.sh', 'README.md', 'THREAT_MODEL.md', 'CHANGELOG.md', 'LICENSE'):
         src = source / name
         if not src.exists():
             continue

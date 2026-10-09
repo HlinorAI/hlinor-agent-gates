@@ -17,7 +17,8 @@
 #   --dry-run             print what would happen, change nothing
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.3.1"
+INSTALL_ARGS=("$@")
 KIT="$(cd "$(dirname "$0")" && pwd)"
 die() { echo "ERROR: $*" >&2; exit 1; }
 say() { echo "• $*"; }
@@ -120,6 +121,24 @@ git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "$REPO is not a git re
 [ "$(git -C "$REPO" rev-parse --show-toplevel)" = "$REPO" ] || die "$REPO is not the repository root"
 MAIN_BRANCH="$(git -C "$REPO" branch --show-current)"
 [ -n "$MAIN_BRANCH" ] || die "detached HEAD; check out your main branch first"
+# Serialize installers before reading mutable preflight state. Dry-run writes nothing.
+if [ "$DRY" != 1 ]; then
+  COMMON="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir)"
+  if [ "${AGENT_GATES_INSTALL_LOCK_PATH:-}" != "$COMMON/agent-gates/install.lock" ] ||
+     ! python3 - "${AGENT_GATES_INSTALL_LOCK_FD:-}" "$COMMON/agent-gates/install.lock" <<'LOCK_CHECK'
+import fcntl, os, sys
+try:
+    fd = int(sys.argv[1])
+    opened, expected = os.fstat(fd), os.stat(sys.argv[2])
+    assert (opened.st_dev, opened.st_ino) == (expected.st_dev, expected.st_ino)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except (ValueError, OSError, AssertionError):
+    sys.exit(1)
+LOCK_CHECK
+  then
+    exec python3 "$KIT/scripts/install_lock.py" "$REPO" "$KIT/init.sh" "${INSTALL_ARGS[@]}"
+  fi
+fi
 git -C "$REPO" rev-parse HEAD >/dev/null 2>&1 || die "no commits yet; make an initial commit first"
 if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
   git -C "$REPO" status --short | head -20
@@ -218,7 +237,7 @@ import os, shlex, sys
 with open(sys.argv[1], "x") as stream:
     for key in ("MAIN_BRANCH", "WT_ROOT", "BACKUP_DIR", "TEST_CMD", "OWNER_NAME"):
         stream.write(key + "=" + shlex.quote(os.environ[key]) + "\n")
-    stream.write('ACCEPT_TTL_HOURS=24\nOWNER_SIGNING_KEY=""\n')
+    stream.write('ACCEPT_TTL_HOURS=24\nTEST_TIMEOUT_SECONDS=1800\nPOLICY_CHANGES=deny\nPOLICY_PATHS=""\nOWNER_SIGNING_KEY=""\n')
 CONFIG
 
 GI="$REPO/.gitignore"
@@ -233,8 +252,31 @@ say "committed $(git -C "$REPO" rev-parse --short HEAD)"
 
 # --- worktrees ----------------------------------------------------------------
 mkdir -p "$WT_ROOT"
+INSTALL_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
+ATTEMPTED=()
 for a in "${AGENT_LIST[@]}"; do
-  git -C "$REPO" worktree add -q "$WT_ROOT/$a" -b "agent/$a" "$MAIN_BRANCH"
+  ATTEMPTED+=("$a")
+  if ! git -C "$REPO" worktree add -q "$WT_ROOT/$a" -b "agent/$a" "$MAIN_BRANCH"; then
+    # Only paths/branches absent at preflight and attempted by this install.
+    for created in "${ATTEMPTED[@]}"; do
+      if [ -e "$WT_ROOT/$created" ]; then
+        git -C "$REPO" worktree remove --force "$WT_ROOT/$created" ||
+          echo "RECOVERY: could not remove $WT_ROOT/$created; inspect before deleting it" >&2
+      fi
+      branch_head="$(git -C "$REPO" rev-parse --verify "refs/heads/agent/$created" 2>/dev/null || true)"
+      if [ "$branch_head" = "$INSTALL_COMMIT" ]; then
+        git -C "$REPO" branch -D "agent/$created" >/dev/null ||
+          echo "RECOVERY: could not remove agent/$created; inspect its worktrees" >&2
+      elif [ -n "$branch_head" ]; then
+        echo "RECOVERY: agent/$created moved externally; left intact" >&2
+      fi
+    done
+    echo "RECOVERY: install commit $INSTALL_COMMIT retained. Fix the worktree error, then run:" >&2
+    for recover in "${AGENT_LIST[@]}"; do
+      printf "  git -C %q worktree add %q -b %q %q\n" "$REPO" "$WT_ROOT/$recover" "agent/$recover" "$MAIN_BRANCH" >&2
+    done
+    die "worktree creation failed; installer-created worktrees and branches cleaned up"
+  fi
   say "worktree $WT_ROOT/$a on agent/$a"
 done
 

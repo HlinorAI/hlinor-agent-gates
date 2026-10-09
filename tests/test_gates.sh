@@ -65,6 +65,7 @@ signed_setup() {
   printf 'owner %s\n' "$(cat "$T/$1-key.pub")" > "$r/.agent-gates/allowed_signers"
   printf 'OWNER_SIGNING_KEY="%s"\n' "$T/$1-key" >> "$r/.agent-gates/config"
   git -C "$r" add .agent-gates; git -C "$r" commit -qm signing || return 1
+  git -C "$wt" merge -q main || return 1
 }
 t1() { setup r1 && deny SELF_VERIFICATION "$cli" verify agent/codex --as codex; }
 t2() {
@@ -259,9 +260,135 @@ t19() {
   v="$("$cli" verify agent/codex --as claude 2>"$T/policy-warning")" || return 1
   [ "$(value "$receipts/verification-$v.json" policy_files_changed)" = "['.agent-gates/config']" ] &&
     grep -qx 'WARNING: branch changes gate policy: .agent-gates/config' "$T/policy-warning" || return 1
-  output="$("$cli" accept "$v" --yes)" || return 1
+  output="$("$cli" accept "$v" --yes --allow-policy-change)" || return 1
   [[ "$output" == *"WARNING: branch changes gate policy: .agent-gates/config"* ]] &&
     [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
+}
+t20() {
+  setup r20 || return 1
+  printf "TEST_CMD=\"sleep 30\"\nTEST_TIMEOUT_SECONDS=2\n" >> "$r/.agent-gates/config"
+  git -C "$r" add .agent-gates/config; git -C "$r" commit -qm timeout || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  started="$(python3 -c "import time; print(time.monotonic())")"
+  verify || return 1
+  python3 - "$receipts/verification-$v.json" "$started" <<'PYTEST'
+import json,sys,time
+r=json.load(open(sys.argv[1]))
+assert r["verdict"] == "REJECT"
+for key in ("result", "baseline"):
+    assert r[key]["exit"] == 124 and r[key]["timed_out"] is True
+assert time.monotonic()-float(sys.argv[2]) < 10
+PYTEST
+  [ "$?" = 0 ] && [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
+}
+t21() {
+  setup r21 || return 1
+  echo "# changed test collection" > "$wt/conftest.py"
+  git -C "$wt" add conftest.py; git -C "$wt" commit -qm collection || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  verify || return 1
+  [ "$(value "$receipts/verification-$v.json" test_files_changed)" = "['conftest.py']" ] || return 1
+  output="$("$cli" accept "$v" --yes)" || return 1
+  [[ "$output" == *"WARNING: branch changes tests: conftest.py"* ]] &&
+    [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
+}
+t22() {
+  setup r22 || return 1
+  printf "# reviewed policy change\n" >> "$wt/.agent-gates/config"
+  git -C "$wt" add .agent-gates/config; git -C "$wt" commit -qm policy || return 1
+  verify && deny POLICY_CHANGE_REQUIRES_OVERRIDE "$cli" accept "$v" --yes || return 1
+  fake_acceptance && deny POLICY_CHANGE_REQUIRES_OVERRIDE "$cli" merge "$a" || return 1
+  a="$("$cli" accept "$v" --yes --allow-policy-change | tail -1)" || return 1
+  [ "$(value "$receipts/acceptance-$a.json" allow_policy_change)" = True ] && "$cli" merge "$a"
+}
+t23() {
+  setup r23 || return 1
+  printf "POLICY_CHANGES=warn\n" >> "$r/.agent-gates/config"
+  git -C "$r" add .agent-gates/config; git -C "$r" commit -qm warn || return 1
+  git -C "$wt" merge -q main || return 1
+  printf "# policy warning\n" >> "$wt/.agent-gates/config"
+  git -C "$wt" add .agent-gates/config; git -C "$wt" commit -qm policy || return 1
+  verify || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  output="$("$cli" accept "$v" --yes)" || return 1
+  [[ "$output" == *"WARNING: branch changes gate policy: .agent-gates/config"* ]] || return 1
+  a="$(printf "%s\n" "$output" | tail -1)"
+  [ "$(value "$receipts/acceptance-$a.json" allow_policy_change)" = False ] &&
+    [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] && "$cli" merge "$a"
+}
+t24() {
+  setup r24 || return 1
+  python3 - "$wt/large.txt" <<'PYTEST'
+import pathlib,sys
+pathlib.Path(sys.argv[1]).write_text("line\n"*999)
+PYTEST
+  git -C "$wt" add large.txt; git -C "$wt" commit -qm threshold || return 1
+  verify && [ "$(value "$receipts/verification-$v.json" risk)" = "[]" ] || return 1
+  echo extra >> "$wt/large.txt"
+  git -C "$wt" add large.txt; git -C "$wt" commit -qm large || return 1
+  verify && [ "$(value "$receipts/verification-$v.json" risk)" = "['LARGE_DIFF']" ] || return 1
+  echo dependency > "$wt/package-lock.json"
+  git -C "$wt" add package-lock.json; git -C "$wt" commit -qm lockfile || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  verify && [ "$(value "$receipts/verification-$v.json" risk)" = "['LARGE_DIFF', 'LOCKFILE']" ] || return 1
+  output="$("$cli" accept "$v" --yes)" || return 1
+  [[ "$output" == *"HIGH_RISK: LARGE_DIFF, LOCKFILE"* ]] &&
+    [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
+}
+t25() {
+  setup r25 || return 1
+  echo "# main policy only" >> "$r/GIT_POLICY.md"
+  echo "# main test only" > "$r/conftest.py"
+  git -C "$r" add GIT_POLICY.md conftest.py; git -C "$r" commit -qm main-only || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  verify && [ "$(value "$receipts/verification-$v.json" policy_files_changed)" = "[]" ] &&
+    [ "$(value "$receipts/verification-$v.json" test_files_changed)" = "[]" ] &&
+    accept && [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
+}
+t26() {
+  setup r26 || return 1
+  printf '%s\n' 'if [ -f feature ]; then echo "1 passed"; else sleep 30; fi' > "$r/check.sh"
+  printf 'TEST_TIMEOUT_SECONDS=2\n' >> "$r/.agent-gates/config"
+  git -C "$r" add check.sh .agent-gates/config; git -C "$r" commit -qm baseline-timeout || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  verify || return 1
+  [ "$(value "$receipts/verification-$v.json" result.exit)" = 0 ] &&
+    [ "$(value "$receipts/verification-$v.json" baseline.exit)" = 124 ] &&
+    [ "$(value "$receipts/verification-$v.json" verdict)" = REJECT ] &&
+    [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] &&
+    deny NOT_ACCEPTED_BY_VERIFIER "$cli" accept "$v" --yes
+}
+t27() {
+  setup r27 || return 1
+  mkdir -p "$wt/bin"
+  echo "# ordinary project tool" > "$wt/bin/tool.sh"
+  echo "# ordinary project installer" > "$wt/init.sh"
+  git -C "$wt" add bin/tool.sh init.sh; git -C "$wt" commit -qm user-code || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  verify && [ "$(value "$receipts/verification-$v.json" policy_files_changed)" = "[]" ] &&
+    accept && [ "$(value "$receipts/acceptance-$a.json" allow_policy_change)" = False ] &&
+    [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] && "$cli" merge "$a"
+}
+t28() {
+  setup r28 || return 1
+  echo "# branch policy edit" >> "$wt/GIT_POLICY.md"
+  git -C "$wt" add GIT_POLICY.md; git -C "$wt" commit -qm policy || return 1
+  verify && [ "$(value "$receipts/verification-$v.json" policy_files_changed)" = "['GIT_POLICY.md']" ] &&
+    deny POLICY_CHANGE_REQUIRES_OVERRIDE "$cli" accept "$v" --yes &&
+    fake_acceptance && deny POLICY_CHANGE_REQUIRES_OVERRIDE "$cli" merge "$a"
+}
+t29() {
+  setup r29 || return 1
+  printf 'POLICY_PATHS="ops/*.sh docs/*.md"\n' >> "$r/.agent-gates/config"
+  git -C "$r" add .agent-gates/config; git -C "$r" commit -qm custom-policy || return 1
+  git -C "$wt" merge -q main || return 1
+  mkdir -p "$wt/ops" "$wt/docs"
+  echo guarded > "$wt/ops/deploy.sh"; echo guarded > "$wt/docs/security.md"
+  echo unguarded > "$wt/ops/note.txt"
+  git -C "$wt" add ops docs; git -C "$wt" commit -qm guarded-files || return 1
+  verify && [ "$(value "$receipts/verification-$v.json" policy_files_changed)" = "['docs/security.md', 'ops/deploy.sh']" ] &&
+    deny POLICY_CHANGE_REQUIRES_OVERRIDE "$cli" accept "$v" --yes &&
+    fake_acceptance && deny POLICY_CHANGE_REQUIRES_OVERRIDE "$cli" merge "$a"
 }
 check "1 self verification" t1
 check "2 dirty main" t2
@@ -282,5 +409,15 @@ check "hook changed tree rolls back merge" t16
 check "worktree TEST_CMD override cannot approve failing tests" t17
 check "old mismatched runner refused at accept and merge" t18
 check "policy changes recorded and warned without denial" t19
+check "test timeout rejects within ten seconds" t20
+check "changed tests recorded and warned" t21
+check "policy deny requires explicit recorded override at accept and merge" t22
+check "policy warn preserves acceptance without override" t23
+check "risk threshold and lockfiles displayed to Owner" t24
+check "main-only policy and test edits do not cause branch warnings" t25
+check "baseline-only timeout also rejects acceptance" t26
+check "ordinary bin tool and init script accept without override" t27
+check "installed GIT_POLICY edit requires override at accept and merge" t28
+check "additional space-separated POLICY_PATHS globs require override" t29
 echo; echo "$pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ]

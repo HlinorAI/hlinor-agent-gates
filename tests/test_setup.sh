@@ -212,6 +212,13 @@ t14() {
     [ "$(wc -l < "$T/commit.log" | tr -d ' ')" = 1 ] &&
     grep -q '^agent-gates: kit missing. Run .*setup-global.sh$' "$T/commit.log"
 }
+t15() {
+  machine t15 || return 1
+  "$KIT/setup-global.sh" > "$T/no-roots.log" 2>&1 || return 1
+  grep -qx 'WARNING: no roots configured, auto-install disabled' "$T/no-roots.log" &&
+    [ ! -s "$HOME/.agent-gates/roots" ] &&
+    new_repo "$root/no-roots" && commit first && no_install && [ ! -s "$T/commit.log" ]
+}
 check '1 new project installs under root' t1
 check '2 outside roots is silent' t2
 check '3 root and repo paths with spaces' t3
@@ -226,5 +233,6 @@ check '11 foreign template refused without changes' t11
 check '12 uninstall preserves user text, kit and projects' t12
 check '13 unconfigured command REJECT, main unchanged' t13
 check '14 missing kit notice never fails commit' t14
+check '15 empty roots explicitly warn and disable auto-install' t15
 echo; echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

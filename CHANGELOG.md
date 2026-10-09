@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1 — 2026-10-09
+
+- Fixed policy classification for installed projects: protect gate files and policy/checklist documents, allow ordinary bin/ and init.sh edits; optional POLICY_PATHS globs extend the protected paths.
+
+- Test runs use isolated process groups and a configurable 1800-second deadline; timeout records exit 124 and REJECT.
+- Receipts record changed test files; accept warns about collection and test configuration edits.
+- BREAKING: policy changes default to deny and require Owner `--allow-policy-change`; acceptances record the override and merge rechecks it.
+- Accept surfaces LARGE_DIFF (more than 1000 changed lines) and LOCKFILE risks.
+- Policy/test paths use merge-base diffs, fixing false positives from main-only changes.
+- Empty project roots warn explicitly; CI uses actions/checkout@v5.
+- Installers share a common-dir flock and clean up their own worktrees/branches on creation failure, retaining the install commit and recovery instructions.
+- Added Quickstart, supported-platform statement and threat model. macOS validation remains with CI.
+
 ## 0.3.0 — 2026-10-08
 
 - BREAKING: init.sh without --test-cmd now fails closed (was: python3 -m pytest tests -q)

@@ -3,19 +3,21 @@
 import argparse
 import contextlib
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 
 class Deny(Exception):
@@ -100,6 +102,15 @@ def config():
             raise ValueError()
     except ValueError:
         raise EnvironmentError_("invalid ACCEPT_TTL_HOURS")
+    values.setdefault("POLICY_CHANGES", "deny")
+    if values["POLICY_CHANGES"] not in ("deny", "warn"):
+        raise EnvironmentError_("invalid POLICY_CHANGES")
+    try:
+        values["TEST_TIMEOUT_SECONDS"] = float(values.get("TEST_TIMEOUT_SECONDS", "1800"))
+        if not 0 < values["TEST_TIMEOUT_SECONDS"] < float("inf"):
+            raise ValueError()
+    except ValueError:
+        raise EnvironmentError_("invalid TEST_TIMEOUT_SECONDS")
     if "branch refs/heads/" + values["MAIN_BRANCH"] not in primary:
         raise EnvironmentError_("primary checkout is not the configured main branch")
     common = Path(git(main, "rev-parse", "--path-format=absolute", "--git-common-dir"))
@@ -197,18 +208,51 @@ class Gates:
         if verification["test_cmd"] != self.cfg["TEST_CMD"]:
             raise Deny("TEST_CMD_MISMATCH", "verification test command differs from main config")
 
+    def policy_files(self, base, head):
+        changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z",
+                      base + "..." + head).split("\0")
+        fixed = {"GIT_POLICY.md", "GIT_POLICY.agent-gates.md", "VERIFIER.md",
+                 "VERIFIER.agent-gates.md"}
+        patterns = self.cfg.get("POLICY_PATHS", "").split()
+        return sorted(path for path in changed if path and (
+            path.startswith(".agent-gates/") or path in fixed or
+            any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)))
+
+    def policy_change_gate(self, verification, allowed=False):
+        # Trusted main config and bound refs define policy, not legacy receipt metadata.
+        policy_files = self.policy_files(verification["base_sha"], verification["head_sha"])
+        if self.cfg["POLICY_CHANGES"] == "deny" and policy_files and allowed is not True:
+            raise Deny("POLICY_CHANGE_REQUIRES_OVERRIDE", "accept requires --allow-policy-change")
+        return policy_files
+
     def test(self, commit):
         with tempfile.TemporaryDirectory(prefix="agent-gates-test-") as temp:
             worktree = Path(temp) / "checkout"
             git(self.repo, "worktree", "add", "--detach", str(worktree), commit)
             try:
                 started = time.monotonic()
-                completed = subprocess.run(self.cfg["TEST_CMD"], shell=True,
-                                           executable="/bin/bash", cwd=worktree,
-                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                output = completed.stdout
+                timed_out = False
+                # A file avoids waiting forever on inherited pipes held by children.
+                with tempfile.TemporaryFile() as log:
+                    process = subprocess.Popen(self.cfg["TEST_CMD"], shell=True,
+                                               executable="/bin/bash", cwd=worktree,
+                                               stdout=log, stderr=subprocess.STDOUT,
+                                               start_new_session=True)
+                    try:
+                        process.wait(timeout=self.cfg["TEST_TIMEOUT_SECONDS"])
+                    except subprocess.TimeoutExpired:
+                        timed_out = True
+                    finally:
+                        # Own process group only; also clean up background test children.
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.wait()
+                    log.seek(0)
+                    output = log.read()
                 lines = [line for line in output.decode(errors="replace").splitlines() if line.strip()]
-                result = {"exit": completed.returncode, "summary": lines[-1] if lines else "",
+                result = {"exit": 124 if timed_out else process.returncode, "timed_out": timed_out, "summary": lines[-1] if lines else "",
                           "output_sha256": digest(output),
                           "seconds": round(time.monotonic() - started, 6)}
                 return result, output
@@ -222,9 +266,29 @@ class Gates:
             raise Deny("SELF_VERIFICATION", "verifier must differ from author")
         self.clean()
         base, head = git(self.repo, "rev-parse", "HEAD"), self.head(args.branch)
-        changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z", base, head).split("\0")
-        policy_files = sorted(path for path in changed if path == "init.sh" or
-                              path.startswith((".agent-gates/", "bin/")))
+        changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z", base + "..." + head).split("\0")
+        policy_files = self.policy_files(base, head)
+        test_files = sorted(path for path in changed if path and (
+            path.startswith("tests/") or any(part == "tests" for part in Path(path).parts) or
+            fnmatch.fnmatchcase(Path(path).name, "test_*") or
+            fnmatch.fnmatchcase(Path(path).name, "*_test.*") or
+            Path(path).name in {"conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg",
+                                "tox.ini", "package.json"}))
+        risk_changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z",
+                           base + "..." + head).split("\0")
+        numstat = git(self.repo, "diff", "--numstat", "--no-renames", "-z", base + "..." + head)
+        changed_lines = 0
+        for entry in numstat.split("\0"):
+            fields = entry.split("\t", 2)
+            if len(fields) == 3 and fields[0].isdigit() and fields[1].isdigit():
+                changed_lines += int(fields[0]) + int(fields[1])
+        risk = []
+        if changed_lines > 1000:
+            risk.append("LARGE_DIFF")
+        if any(Path(path).name.endswith(".lock") or Path(path).name in
+               {"package-lock.json", "poetry.lock", "Cargo.lock", "go.sum"}
+               for path in risk_changed if path):
+            risk.append("LOCKFILE")
         tree = self.merge_tree(base, head)
         commit = git(self.repo, "commit-tree", tree, "-p", base, "-p", head,
                      "-m", "agent-gates temporary verification")
@@ -237,8 +301,9 @@ class Gates:
             "branch": args.branch, "author": author, "verifier": args.verifier,
             "base_sha": base, "head_sha": head, "merge_tree": tree,
             "test_cmd": self.cfg["TEST_CMD"], "policy_files_changed": policy_files,
+            "test_files_changed": test_files, "risk": risk,
             "result": result, "baseline": baseline,
-            "verdict": "ACCEPT" if result["exit"] == 0 else "REJECT",
+            "verdict": "ACCEPT" if result["exit"] == 0 and not baseline.get("timed_out") else "REJECT",
             "created_at": stamp(), "tool_version": VERSION,
         }
         record["id"] = receipt_id(record)
@@ -277,14 +342,18 @@ class Gates:
         self.verdict(verification)
         self.test_command(verification)
         self.fresh(verification)
+        policy_files = self.policy_change_gate(verification, args.allow_policy_change)
         print("author: " + verification["author"] + "; verifier: " + verification["verifier"])
         print(git(self.repo, "log", "--oneline", verification["base_sha"] + ".." + verification["head_sha"]))
         print(git(self.repo, "diff", "--stat", verification["base_sha"], verification["head_sha"]))
         print("test_cmd: " + verification["test_cmd"] + "; tests: " + verification["result"]["summary"])
         print("baseline: " + verification["baseline"].get("summary", "SKIPPED"))
-        if verification.get("policy_files_changed"):
-            print("WARNING: branch changes gate policy: " +
-                  ", ".join(verification["policy_files_changed"]))
+        if policy_files:
+            print("WARNING: branch changes gate policy: " + ", ".join(policy_files))
+        if verification.get("test_files_changed"):
+            print("WARNING: branch changes tests: " + ", ".join(verification["test_files_changed"]))
+        if verification.get("risk"):
+            print("HIGH_RISK: " + ", ".join(verification["risk"]))
         if not args.yes and input("Accept this verification? Type yes: ").strip() != "yes":
             raise EnvironmentError_("acceptance not confirmed")
         # Owner may take time at the prompt; bind to current refs again before writing.
@@ -294,7 +363,7 @@ class Gates:
                   "owner": self.cfg["OWNER_NAME"], "created_at": stamp(),
                   "expires_at": (datetime.now(timezone.utc) +
                                  timedelta(hours=self.cfg["ACCEPT_TTL_HOURS"])).isoformat().replace("+00:00", "Z"),
-                  "signature": None}
+                  "signature": None, "allow_policy_change": args.allow_policy_change}
         key = self.cfg.get("OWNER_SIGNING_KEY")
         if key:
             signed = run(["ssh-keygen", "-Y", "sign", "-f", key, "-n", "agent-gates"],
@@ -328,6 +397,7 @@ class Gates:
             raise Deny("RECEIPT_TAMPERED", "accepted verification bytes changed")
         self.verdict(verification)
         self.test_command(verification)
+        self.policy_change_gate(verification, acceptance.get("allow_policy_change", False))
         # Replay is diagnosed before freshness: a successful merge necessarily moves main.
         for path in self.directory.glob("merge-*.json"):
             merged, _ = self.load("merge", path.stem.removeprefix("merge-"))
@@ -421,6 +491,7 @@ def main():
     accept = commands.add_parser("accept")
     accept.add_argument("identifier")
     accept.add_argument("--yes", action="store_true")
+    accept.add_argument("--allow-policy-change", action="store_true")
     merge = commands.add_parser("merge")
     merge.add_argument("identifier")
     status = commands.add_parser("status")
