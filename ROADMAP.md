@@ -34,7 +34,7 @@ Everything below exists to move rows 2–4 into the first row.
 | 4 | HIGH_RISK flag: diff size, lockfile changes | 1/5 | cheap signal for the Owner |
 | 5 | Install lock + roll back created worktrees on failure | 2/5 | **(verified)** no rollback after the install commit |
 | 6 | Debt from v0.3.0 review: `base...head`, `setup-global` without `--root` warning, `actions/checkout@v5` | — | |
-| 7 | Docs: 5-minute quickstart, `THREAT_MODEL.md`, "Supported: Linux, macOS. Not supported: Windows" | 4/5 | |
+| 7 | Docs: 5-minute quickstart, `THREAT_MODEL.md` (cite HarnessSecurity-Bench, arXiv:2610.07639: auto-approve raised attack success 29.2% → 95.6%), "Supported: Linux, macOS. Not supported: Windows" | 4/5 | |
 
 ## v0.4 — Enforced local mode (≈1 week)
 
@@ -50,6 +50,11 @@ OS user — any agent can read any other agent's key. Identity becomes real only
 | 5 | Owner signature mandatory in enforced mode; cooperative mode stays opt-in (`--insecure`) | 2/5 |
 | 6 | Receipt binds policy hash and test-command hash | 2/5 |
 | 7 | `agent-gates doctor` (git, worktrees, users, permissions, keys, stale state) | 2/5 |
+
+**Done when (effect reachability, not command lists):** as an agent OS user, every known path that could move `main` fails —
+`git merge`, `git update-ref`, `git push` to the gatekeeper, editing `.git/refs` / `packed-refs`, `git worktree` tricks,
+replacing the gate CLI or policy, removing hooks. One test per path; the effect (main unchanged) is asserted, not the error text.
+Rationale: HarnessSecurity-Bench (arXiv:2610.07639) found permitted tools leave alternative paths to forbidden operations.
 
 ## v0.5 — GitHub integration (≈1 week)
 
@@ -68,6 +73,12 @@ OS user — any agent can read any other agent's key. Identity becomes real only
 | 3 | Lifecycle: `list-agents`, `remove-agent`, `cleanup`, `export-audit` | 1/5 |
 | 4 | Hash-chained audit log | 1/5 |
 | 5 | Drop-in pre-merge hook for orchestrators; MCP server exposing verify/accept | 2/5 |
+
+## Rule for every new gate
+
+New DENY rules ship as `warn` first, then move to `deny` by criteria written down before looking at the results.
+A gate that never fires is not proven to work: each gate needs a sabotage test showing it fires.
+(Lesson from "Mechanizing the User's Eye", arXiv:2610.05981: 12 enforcing days, zero verdicts, precision undefined.)
 
 ## Not now
 
