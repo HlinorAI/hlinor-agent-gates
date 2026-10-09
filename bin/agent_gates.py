@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -100,6 +101,12 @@ def config():
             raise ValueError()
     except ValueError:
         raise EnvironmentError_("invalid ACCEPT_TTL_HOURS")
+    try:
+        values["TEST_TIMEOUT_SECONDS"] = float(values.get("TEST_TIMEOUT_SECONDS", "1800"))
+        if not 0 < values["TEST_TIMEOUT_SECONDS"] < float("inf"):
+            raise ValueError()
+    except ValueError:
+        raise EnvironmentError_("invalid TEST_TIMEOUT_SECONDS")
     if "branch refs/heads/" + values["MAIN_BRANCH"] not in primary:
         raise EnvironmentError_("primary checkout is not the configured main branch")
     common = Path(git(main, "rev-parse", "--path-format=absolute", "--git-common-dir"))
@@ -203,12 +210,28 @@ class Gates:
             git(self.repo, "worktree", "add", "--detach", str(worktree), commit)
             try:
                 started = time.monotonic()
-                completed = subprocess.run(self.cfg["TEST_CMD"], shell=True,
-                                           executable="/bin/bash", cwd=worktree,
-                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                output = completed.stdout
+                timed_out = False
+                # A file avoids waiting forever on inherited pipes held by children.
+                with tempfile.TemporaryFile() as log:
+                    process = subprocess.Popen(self.cfg["TEST_CMD"], shell=True,
+                                               executable="/bin/bash", cwd=worktree,
+                                               stdout=log, stderr=subprocess.STDOUT,
+                                               start_new_session=True)
+                    try:
+                        process.wait(timeout=self.cfg["TEST_TIMEOUT_SECONDS"])
+                    except subprocess.TimeoutExpired:
+                        timed_out = True
+                    finally:
+                        # Own process group only; also clean up background test children.
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.wait()
+                    log.seek(0)
+                    output = log.read()
                 lines = [line for line in output.decode(errors="replace").splitlines() if line.strip()]
-                result = {"exit": completed.returncode, "summary": lines[-1] if lines else "",
+                result = {"exit": 124 if timed_out else process.returncode, "timed_out": timed_out, "summary": lines[-1] if lines else "",
                           "output_sha256": digest(output),
                           "seconds": round(time.monotonic() - started, 6)}
                 return result, output

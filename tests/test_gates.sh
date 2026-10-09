@@ -263,6 +263,23 @@ t19() {
   [[ "$output" == *"WARNING: branch changes gate policy: .agent-gates/config"* ]] &&
     [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
 }
+t20() {
+  setup r20 || return 1
+  printf "TEST_CMD=\"sleep 30\"\nTEST_TIMEOUT_SECONDS=2\n" >> "$r/.agent-gates/config"
+  git -C "$r" add .agent-gates/config; git -C "$r" commit -qm timeout || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  started="$(python3 -c "import time; print(time.monotonic())")"
+  verify || return 1
+  python3 - "$receipts/verification-$v.json" "$started" <<'PYTEST'
+import json,sys,time
+r=json.load(open(sys.argv[1]))
+assert r["verdict"] == "REJECT"
+for key in ("result", "baseline"):
+    assert r[key]["exit"] == 124 and r[key]["timed_out"] is True
+assert time.monotonic()-float(sys.argv[2]) < 10
+PYTEST
+  [ "$?" = 0 ] && [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
+}
 check "1 self verification" t1
 check "2 dirty main" t2
 check "3 rejected tests cannot be accepted" t3
@@ -282,5 +299,6 @@ check "hook changed tree rolls back merge" t16
 check "worktree TEST_CMD override cannot approve failing tests" t17
 check "old mismatched runner refused at accept and merge" t18
 check "policy changes recorded and warned without denial" t19
+check "test timeout rejects within ten seconds" t20
 echo; echo "$pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ]
