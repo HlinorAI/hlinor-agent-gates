@@ -228,7 +228,7 @@ Be precise about this, because the name says "gates".
 | Only Git Agent can move main | | ⚠️ separate OS users/clones are not part of v0.2 |
 | No push | | ⚠️ `GIT_POLICY.md` |
 
-Today an agent running as the same OS user as you **can** ignore the policy rows, and can remove a lock flag it is able to set. Worktrees share one `.git`, so any agent that can commit can also move `main`. Real enforcement needs agents in separate clones under separate OS users, with merges allowed only against a signed approval receipt bound to the reviewed commit SHA. That enforcement mode is separate from v0.2; v0.2 supplies the receipts and CLI checks.
+In cooperative mode, an agent running as the same OS user as you **can** ignore the policy rows, and can remove a lock flag it is able to set. Worktrees share one `.git`, so any agent that can commit can also move `main`. Real enforcement needs agents in separate clones under separate OS users, with merges allowed only against a signed approval receipt bound to the reviewed commit SHA. Linux enforced mode below makes separate OS users and signed approvals the only gate path; cooperative mode supplies CLI checks.
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for the trust boundary and bypasses.
 
@@ -248,3 +248,77 @@ bash tests/test_gates.sh  # 29 gate checks, including timeouts, policy override 
 ## License
 
 MIT. Built and used in production at [Hlinor](https://hlinor.com).
+
+## Enforced mode (Linux)
+
+| Guarantee | Machine boundary in enforced mode | Owner responsibility |
+|---|---|---|
+| Main updates | restricted pushes; signed acceptance and atomic bare merge | never run agents as root |
+| Gate code, policy, keys and receipts | OS ownership, separate UIDs and narrow sudo rules | verify the root-owned release kit |
+| Verifier identity and exact tested tree | sudo identity, archive export and gate signature | review test changes and risks |
+| Runner persistence | UID process kill, cron/at deny policy and temporary-file cleanup | keep alternative schedulers disabled; run root doctor |
+| External publication and network effects | outside this local boundary | external approvals and network policy |
+
+
+Run `enforce init` only from a root-owned kit checkout whose files and directories
+are not writable by group or others, verified against the release tag, for example:
+
+```bash
+/root/agent-gates-kit/bin/agent-gates enforce init /path/to/project --agents codex,claude,zcode
+```
+
+Never run it from a project's `.agent-gates/`. `UNTRUSTED_SOURCE` prevents loading
+a substituted `enforced.py`; it cannot protect you from a substituted
+`agent_gates.py` entry point. The Owner must verify the kit before running it as root.
+Initialization imports only the committed `main`, ignoring dirty working-tree files.
+
+The project must have a committed `.agent-gates/config` with its real `TEST_CMD`.
+Enforced mode requires Linux, Git >= 2.38, Python 3, sudo/visudo, ssh-keygen,
+user/group utilities, pkill and find. Cron/at utilities are used when installed.
+The Owner must use separate non-root OS accounts to launch agents.
+
+Setup creates `agent-<name>` clones in `/home/agent-<name>/work/<project>`, the gate
+in `/opt/agent-gates`, bare repositories in `/srv/agent-gates`, and private state
+in `/var/lib/agent-gates`. Agent clones use the restricted `gate` remote.
+For a project named `project`, the review flow is:
+
+```bash
+# agent-codex, in its own clone:
+git push gate agent/codex
+# agent-claude, independently:
+sudo -u agent-gates /opt/agent-gates/bin/agent-gates verify project agent/codex
+# Owner root, using the printed verification ID:
+/opt/agent-gates/bin/agent-gates accept <verification-id>
+# Git agent, using the printed acceptance ID:
+sudo -u agent-gates /opt/agent-gates/bin/agent-gates merge project <acceptance-id>
+# Owner root, checking the complete boundary:
+/opt/agent-gates/bin/agent-gates doctor project
+```
+
+`--as` is rejected: identity comes from sudo. Gate signatures use namespace
+`agent-gates-receipt`; mandatory Owner signatures use `agent-gates`. Setup keeps
+the Owner key under `/root/.ssh/agent-gates-owner`. Verification/merge receipts
+and logs are private to the gate and Owner; `status <project>` exposes validity
+through the CLI. Main policy changes invalidate prior verification.
+
+The protected `info/attributes` file disables export-ignore/export-subst even
+when a branch changes `.gitattributes`. Root setup denies cron/at use by
+ag-runner and removes its existing jobs. Root doctor also checks that systemd
+linger is absent. Unprivileged doctor reports `privileged doctor required` for
+these checks. Cleanup runs as ag-runner, never root, and fails closed if temporary
+files or live processes remain. No extra sudo rights are granted.
+
+Root or a root-launched agent can bypass the boundary. Network isolation and
+GitHub enforcement are outside this mode. The Owner must not enable alternative
+schedulers or change runner permissions after setup. Use cooperative mode on macOS;
+Windows is unsupported. Review [THREAT_MODEL.md](THREAT_MODEL.md) for the remaining
+policy assumptions.
+
+Run enforced validation only in a disposable container:
+
+```bash
+bash tests/test_enforced.sh
+```
+
+This script requires a working Docker or Podman runtime; it provisions only inside
+the container, mounts the kit read-only, and removes the container afterward.

@@ -5,6 +5,8 @@ import contextlib
 import fcntl
 import fnmatch
 import hashlib
+import importlib.util
+import stat
 import json
 import os
 from pathlib import Path
@@ -17,7 +19,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 
 
 class Deny(Exception):
@@ -273,7 +275,7 @@ class Gates:
             fnmatch.fnmatchcase(Path(path).name, "test_*") or
             fnmatch.fnmatchcase(Path(path).name, "*_test.*") or
             Path(path).name in {"conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg",
-                                "tox.ini", "package.json"}))
+                                "tox.ini", "package.json", ".gitattributes"}))
         risk_changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z",
                            base + "..." + head).split("\0")
         numstat = git(self.repo, "diff", "--numstat", "--no-renames", "-z", base + "..." + head)
@@ -482,6 +484,33 @@ class Gates:
 
 
 def main():
+    # Protected installed entry point never falls back to cooperative repository code.
+    installed = Path(__file__).resolve().parent == Path("/opt/agent-gates/bin")
+    if installed or (len(sys.argv) > 1 and sys.argv[1] in ("enforce", "doctor")):
+        source = Path(__file__).resolve().parent
+        # Validate before importing project-controlled Python into a root process.
+        if sys.argv[1:3] == ["enforce", "init"]:
+            paths = [source / name for name in
+                     ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py")]
+            paths += [source, *source.parents]
+            trusted = (source.name == "bin" and ".agent-gates" not in source.parts
+                       and ".agent-gates" not in Path(__file__).absolute().parts
+                       and (source.parent / ".git").exists()
+                       and (source.parent / "docs/spec/v0.4-enforced.md").is_file())
+            try:
+                trusted = trusted and all(not path.is_symlink() and path.lstat().st_uid == 0
+                                          and not path.lstat().st_mode & 0o022
+                                          and (stat.S_ISREG(path.lstat().st_mode) or
+                                               stat.S_ISDIR(path.lstat().st_mode)) for path in paths)
+            except OSError:
+                trusted = False
+            if not trusted:
+                print("DENY UNTRUSTED_SOURCE: enforce init requires a protected root-owned kit checkout", file=sys.stderr)
+                return 1
+        module_spec = importlib.util.spec_from_file_location("enforced", source / "enforced.py")
+        enforced = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(enforced)
+        return enforced.main(sys.argv[1:])
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
     verify = commands.add_parser("verify")
