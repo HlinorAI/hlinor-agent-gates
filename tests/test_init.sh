@@ -81,5 +81,52 @@ fi
 mkrepo r9; ln -s "$T/r9" "$T/r9-link"
 check "install via symlinked path" "$KIT/init.sh" "$T/r9-link"
 
+# 10. Inject a failure after a branch was created; keep the install commit and unrelated work.
+worktree_failure() {
+  mkrepo r10
+  git -C "$T/r10" worktree add -q "$T/manual-wt" -b agent/manual || return 1
+  before="$(git -C "$T/r10" rev-parse HEAD)"
+  mkdir "$T/fail-git"
+  real_git="$(command -v git)"
+  cat > "$T/fail-git/git" <<'FAKE'
+#!/usr/bin/env bash
+if [ "${3:-}" = worktree ] && [ "${4:-}" = add ] && [[ "$*" == *"agent/claude"* ]]; then
+  "$REAL_GIT" -C "$2" branch agent/claude
+  echo "injected worktree failure" >&2
+  exit 1
+fi
+exec "$REAL_GIT" "$@"
+FAKE
+  chmod +x "$T/fail-git/git"
+  if REAL_GIT="$real_git" PATH="$T/fail-git:$PATH" "$KIT/init.sh" "$T/r10" > "$T/recovery.log" 2>&1; then return 1; fi
+  [ "$(git -C "$T/r10" rev-parse HEAD)" != "$before" ] && clean "$T/r10" &&
+    [ -d "$T/r10/.agent-gates" ] && [ -d "$T/manual-wt" ] &&
+    [ ! -e "$T/r10-wt/codex" ] && [ ! -e "$T/r10-wt/claude" ] &&
+    [ "$(git -C "$T/r10" for-each-ref --format='%(refname:short)' refs/heads/agent/)" = agent/manual ] &&
+    [ "$(git -C "$T/r10" worktree list --porcelain | grep -c '^worktree ')" = 2 ] &&
+    grep -q '^RECOVERY: install commit .* retained.' "$T/recovery.log" &&
+    grep -q 'worktree add.*agent/codex' "$T/recovery.log"
+}
+check "worktree failure cleans own branches and preserves install commit" worktree_failure
+
+# 11. Two installers share a flock and cannot both pass preflight.
+concurrent_install() {
+  mkrepo r11
+  cat > "$T/r11/.git/hooks/pre-commit" <<'HOOK'
+#!/usr/bin/env bash
+sleep 1
+HOOK
+  chmod +x "$T/r11/.git/hooks/pre-commit"
+  "$KIT/init.sh" "$T/r11" > "$T/install-1.log" 2>&1 & one=$!
+  "$KIT/init.sh" "$T/r11" > "$T/install-2.log" 2>&1 & two=$!
+  wait "$one"; first_rc=$?
+  wait "$two"; second_rc=$?
+  [ "$((first_rc + second_rc))" = 1 ] && clean "$T/r11" &&
+    [ "$(git -C "$T/r11" rev-list --count HEAD)" = 2 ] &&
+    [ "$(git -C "$T/r11" worktree list --porcelain | grep -c '^worktree ')" = 3 ] &&
+    [ -f "$T/r11/.git/agent-gates/install.lock" ]
+}
+check "concurrent installs serialize through common-dir flock" concurrent_install
+
 echo; echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
