@@ -65,6 +65,7 @@ signed_setup() {
   printf 'owner %s\n' "$(cat "$T/$1-key.pub")" > "$r/.agent-gates/allowed_signers"
   printf 'OWNER_SIGNING_KEY="%s"\n' "$T/$1-key" >> "$r/.agent-gates/config"
   git -C "$r" add .agent-gates; git -C "$r" commit -qm signing || return 1
+  git -C "$wt" merge -q main || return 1
 }
 t1() { setup r1 && deny SELF_VERIFICATION "$cli" verify agent/codex --as codex; }
 t2() {
@@ -259,7 +260,7 @@ t19() {
   v="$("$cli" verify agent/codex --as claude 2>"$T/policy-warning")" || return 1
   [ "$(value "$receipts/verification-$v.json" policy_files_changed)" = "['.agent-gates/config']" ] &&
     grep -qx 'WARNING: branch changes gate policy: .agent-gates/config' "$T/policy-warning" || return 1
-  output="$("$cli" accept "$v" --yes)" || return 1
+  output="$("$cli" accept "$v" --yes --allow-policy-change)" || return 1
   [[ "$output" == *"WARNING: branch changes gate policy: .agent-gates/config"* ]] &&
     [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
 }
@@ -291,6 +292,30 @@ t21() {
   [[ "$output" == *"WARNING: branch changes tests: conftest.py"* ]] &&
     [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
 }
+t22() {
+  setup r22 || return 1
+  printf "# reviewed policy change\n" >> "$wt/.agent-gates/config"
+  git -C "$wt" add .agent-gates/config; git -C "$wt" commit -qm policy || return 1
+  verify && deny POLICY_CHANGE_REQUIRES_OVERRIDE "$cli" accept "$v" --yes || return 1
+  fake_acceptance && deny POLICY_CHANGE_REQUIRES_OVERRIDE "$cli" merge "$a" || return 1
+  a="$("$cli" accept "$v" --yes --allow-policy-change | tail -1)" || return 1
+  [ "$(value "$receipts/acceptance-$a.json" allow_policy_change)" = True ] && "$cli" merge "$a"
+}
+t23() {
+  setup r23 || return 1
+  printf "POLICY_CHANGES=warn\n" >> "$r/.agent-gates/config"
+  git -C "$r" add .agent-gates/config; git -C "$r" commit -qm warn || return 1
+  git -C "$wt" merge -q main || return 1
+  printf "# policy warning\n" >> "$wt/.agent-gates/config"
+  git -C "$wt" add .agent-gates/config; git -C "$wt" commit -qm policy || return 1
+  verify || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  output="$("$cli" accept "$v" --yes)" || return 1
+  [[ "$output" == *"WARNING: branch changes gate policy: .agent-gates/config"* ]] || return 1
+  a="$(printf "%s\n" "$output" | tail -1)"
+  [ "$(value "$receipts/acceptance-$a.json" allow_policy_change)" = False ] &&
+    [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] && "$cli" merge "$a"
+}
 check "1 self verification" t1
 check "2 dirty main" t2
 check "3 rejected tests cannot be accepted" t3
@@ -312,5 +337,7 @@ check "old mismatched runner refused at accept and merge" t18
 check "policy changes recorded and warned without denial" t19
 check "test timeout rejects within ten seconds" t20
 check "changed tests recorded and warned" t21
+check "policy deny requires explicit recorded override at accept and merge" t22
+check "policy warn preserves acceptance without override" t23
 echo; echo "$pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ]

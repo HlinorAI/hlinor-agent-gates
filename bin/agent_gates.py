@@ -102,6 +102,9 @@ def config():
             raise ValueError()
     except ValueError:
         raise EnvironmentError_("invalid ACCEPT_TTL_HOURS")
+    values.setdefault("POLICY_CHANGES", "deny")
+    if values["POLICY_CHANGES"] not in ("deny", "warn"):
+        raise EnvironmentError_("invalid POLICY_CHANGES")
     try:
         values["TEST_TIMEOUT_SECONDS"] = float(values.get("TEST_TIMEOUT_SECONDS", "1800"))
         if not 0 < values["TEST_TIMEOUT_SECONDS"] < float("inf"):
@@ -204,6 +207,15 @@ class Gates:
     def test_command(self, verification):
         if verification["test_cmd"] != self.cfg["TEST_CMD"]:
             raise Deny("TEST_CMD_MISMATCH", "verification test command differs from main config")
+
+    def policy_change_gate(self, verification, allowed=False):
+        # Recompute from bound refs so legacy/missing metadata cannot bypass the gate.
+        changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z",
+                      verification["base_sha"], verification["head_sha"]).split("\0")
+        policy_changed = verification.get("policy_files_changed") or any(
+            path == "init.sh" or path.startswith((".agent-gates/", "bin/")) for path in changed)
+        if self.cfg["POLICY_CHANGES"] == "deny" and policy_changed and allowed is not True:
+            raise Deny("POLICY_CHANGE_REQUIRES_OVERRIDE", "accept requires --allow-policy-change")
 
     def test(self, commit):
         with tempfile.TemporaryDirectory(prefix="agent-gates-test-") as temp:
@@ -308,6 +320,7 @@ class Gates:
         self.verdict(verification)
         self.test_command(verification)
         self.fresh(verification)
+        self.policy_change_gate(verification, args.allow_policy_change)
         print("author: " + verification["author"] + "; verifier: " + verification["verifier"])
         print(git(self.repo, "log", "--oneline", verification["base_sha"] + ".." + verification["head_sha"]))
         print(git(self.repo, "diff", "--stat", verification["base_sha"], verification["head_sha"]))
@@ -327,7 +340,7 @@ class Gates:
                   "owner": self.cfg["OWNER_NAME"], "created_at": stamp(),
                   "expires_at": (datetime.now(timezone.utc) +
                                  timedelta(hours=self.cfg["ACCEPT_TTL_HOURS"])).isoformat().replace("+00:00", "Z"),
-                  "signature": None}
+                  "signature": None, "allow_policy_change": args.allow_policy_change}
         key = self.cfg.get("OWNER_SIGNING_KEY")
         if key:
             signed = run(["ssh-keygen", "-Y", "sign", "-f", key, "-n", "agent-gates"],
@@ -361,6 +374,7 @@ class Gates:
             raise Deny("RECEIPT_TAMPERED", "accepted verification bytes changed")
         self.verdict(verification)
         self.test_command(verification)
+        self.policy_change_gate(verification, acceptance.get("allow_policy_change", False))
         # Replay is diagnosed before freshness: a successful merge necessarily moves main.
         for path in self.directory.glob("merge-*.json"):
             merged, _ = self.load("merge", path.stem.removeprefix("merge-"))
@@ -454,6 +468,7 @@ def main():
     accept = commands.add_parser("accept")
     accept.add_argument("identifier")
     accept.add_argument("--yes", action="store_true")
+    accept.add_argument("--allow-policy-change", action="store_true")
     merge = commands.add_parser("merge")
     merge.add_argument("identifier")
     status = commands.add_parser("status")
