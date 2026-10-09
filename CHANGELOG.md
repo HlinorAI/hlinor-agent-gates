@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0 — 2026-10-09
+
+- Added opt-in Linux enforced mode with separate agent, gate and runner OS users, protected bare repositories and restricted push hooks.
+- Verification runs committed exports as ag-runner under a machine-wide lock; timeouts kill runner processes and temporary files are cleared as the runner UID.
+- OS identities replace --as; verification/merge receipts are gate-signed and Owner acceptance signatures are mandatory.
+- Bare merges use commit-tree and atomic ref transactions, binding reviewed refs, policy tree and test command.
+- Setup accepts only a protected root-owned kit checkout and imports committed main without reading working-tree filters.
+- Protected archive attributes prevent export-ignore/export-subst bypasses; .gitattributes edits appear as test changes.
+- Setup denies cron/at scheduling for the runner and removes existing schedules; root doctor checks schedules, linger and archive-attribute integrity.
+- Added 14 effect-based attack scenarios, container regressions and an ubuntu-latest enforced CI job. CI results remain to be verified after publication.
+
 ## 0.3.1 — 2026-10-09
 
 - Fixed policy classification for installed projects: protect gate files and policy/checklist documents, allow ordinary bin/ and init.sh edits; optional POLICY_PATHS globs extend the protected paths.

@@ -67,6 +67,15 @@ def runner_main(argv):
     runner = pwd.getpwnam("ag-runner")
     if os.geteuid() != runner.pw_uid or os.environ.get("SUDO_USER") != "agent-gates":
         deny("INVALID_IDENTITY", "runner requires sudo from agent-gates")
+    if argv == ["clean"]:
+        roots = ["/tmp", "/var/tmp", "/dev/shm"]
+        deleted = subprocess.run(["/usr/bin/find", *roots, "-xdev", "-ignore_readdir_race",
+                                  "-user", "ag-runner", "-delete"], capture_output=True)
+        remaining = subprocess.run(["/usr/bin/find", *roots, "-xdev", "-ignore_readdir_race",
+                                    "-user", "ag-runner", "-print", "-quit"], capture_output=True)
+        if deleted.returncode or remaining.returncode or remaining.stdout:
+            deny("RUNNER_CLEANUP_FAILED", "runner-owned temporary files could not be fully removed")
+        return 0
     if argv == ["kill"]:
         # exec avoids killing the cleanup supervisor itself: pkill excludes its own PID.
         os.execve("/usr/bin/pkill", ["pkill", "-KILL", "-u", str(runner.pw_uid)], environment())
@@ -244,7 +253,7 @@ class Gates:
             deny("BAD_SIGNATURE", "mandatory receipt signature missing")
         if acceptance and record.get("owner") != "root":
             deny("BAD_SIGNATURE", "acceptance must be signed by Owner")
-        with tempfile.TemporaryDirectory(prefix="agent-gates-signature-") as temp:
+        with tempfile.TemporaryDirectory(prefix="signature-", dir=self.directory.parent) as temp:
             signature = Path(temp) / "signature"
             signature.write_text(record["signature"])
             if acceptance:
@@ -354,6 +363,9 @@ class Gates:
         result = self.runner("remove", token)
         if result.returncode:
             deny("RUNNER_CLEANUP_FAILED", "could not remove runner export")
+        result = self.runner("clean")
+        if result.returncode:
+            deny("RUNNER_CLEANUP_FAILED", "could not clear runner-owned temporary files")
         # Zombies cannot execute; ignore them, but deny if any live process remains.
         uid = pwd.getpwnam("ag-runner").pw_uid
         deadline = time.monotonic() + 2
@@ -439,7 +451,7 @@ class Gates:
         changed = self.changes(record)
         record["test_files_changed"] = sorted(path for path in changed if "tests" in Path(path).parts
             or fnmatch.fnmatchcase(Path(path).name, "test_*") or fnmatch.fnmatchcase(Path(path).name, "*_test.*")
-            or Path(path).name in {"conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "package.json"})
+            or Path(path).name in {"conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "package.json", ".gitattributes"})
         lines = 0
         for entry in self.git("diff", "--no-ext-diff", "--no-textconv", "--numstat", "--no-renames", "-z", base + "..." + head).split("\0"):
             parts = entry.split("\t", 2)

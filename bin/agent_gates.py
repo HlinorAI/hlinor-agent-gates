@@ -275,7 +275,7 @@ class Gates:
             fnmatch.fnmatchcase(Path(path).name, "test_*") or
             fnmatch.fnmatchcase(Path(path).name, "*_test.*") or
             Path(path).name in {"conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg",
-                                "tox.ini", "package.json"}))
+                                "tox.ini", "package.json", ".gitattributes"}))
         risk_changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z",
                            base + "..." + head).split("\0")
         numstat = git(self.repo, "diff", "--numstat", "--no-renames", "-z", base + "..." + head)

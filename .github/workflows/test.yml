@@ -24,3 +24,9 @@ jobs:
         run: bash tests/test_gates.sh
       - name: Automatic setup (Linux and macOS)
         run: bash tests/test_setup.sh
+  enforced:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Enforced mode (disposable Linux container)
+        run: bash tests/test_enforced.sh

@@ -16,6 +16,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 
 VERSION = "0.4.0"
@@ -24,6 +25,7 @@ REPOS = Path("/srv/agent-gates")
 STATE = Path("/var/lib/agent-gates")
 SUDOERS = Path("/etc/sudoers.d/agent-gates")
 OWNER_KEY = Path("/root/.ssh/agent-gates-owner")
+ARCHIVE_ATTRIBUTES = "* -export-ignore -export-subst\n"
 EXPECTED_SUDOERS = """Defaults:%agents env_reset, !setenv
 %agents     ALL=(agent-gates) NOPASSWD: /opt/agent-gates/bin/agent-gates verify *, /opt/agent-gates/bin/agent-gates merge *, /opt/agent-gates/bin/agent-gates status *, /opt/agent-gates/bin/gate-receive-pack *
 agent-gates ALL=(ag-runner)   NOPASSWD: /opt/agent-gates/bin/ag-run *
@@ -174,6 +176,53 @@ def pre_receive():
     return 0
 
 
+def scheduler_users(path):
+    path = Path(path)
+    if not path.exists() and not path.is_symlink():
+        return []
+    st = path.lstat()
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022:
+        deny("UNSAFE_PATH", "scheduler policy must be a protected root file: " + str(path))
+    return [user for line in path.read_text().splitlines()
+            for user in line.split("#", 1)[0].split()]
+
+
+def at_jobs():
+    if not shutil.which("atq"):
+        for path in (Path("/var/spool/cron/atjobs"), Path("/var/spool/at")):
+            if path.exists() and any(path.iterdir()):
+                deny("MISSING_DEPENDENCY", "atq required to inspect existing jobs")
+        return []
+    return [line.split()[0] for line in run("atq").splitlines()
+            if line.split() and line.split()[-1] == "ag-runner"]
+
+
+def block_schedulers():
+    # Root provisioning only. Never grant privileged cleanup to the test gateway.
+    for name in ("cron", "at"):
+        if "ag-runner" in scheduler_users("/etc/" + name + ".allow"):
+            deny("RUNNER_SCHEDULER_ALLOWED", "remove ag-runner from " + name + ".allow")
+    for name in ("cron", "at"):
+        path = Path("/etc/" + name + ".deny")
+        users = scheduler_users(path)
+        if "ag-runner" not in users:
+            original = path.read_text() if path.exists() else ""
+            with tempfile.NamedTemporaryFile(mode="w", dir="/etc", prefix=".agent-gates-deny-", delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(original + ("\n" if original and not original.endswith("\n") else "") + "ag-runner\n")
+            try:
+                temporary.chmod(0o644)
+                os.chown(temporary, 0, 0)
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+    Path("/var/spool/cron/crontabs/ag-runner").unlink(missing_ok=True)
+    for job in at_jobs():
+        if not job.isdigit():
+            deny("INVALID_SCHEDULE", "invalid at job id")
+        run("atrm", job)
+
+
 def init(repo_arg, agent_names):
     if sys.platform != "linux" or os.geteuid() != 0:
         deny("ROOT_REQUIRED", "enforce init requires Linux root")
@@ -222,6 +271,7 @@ def init(repo_arg, agent_names):
     for parent in (CODE, REPOS, STATE):
         if parent.is_symlink():
             deny("UNSAFE_PATH", "symlink: " + str(parent))
+    block_schedulers()
     agents = group("agents")
     gate_group, runner_group = group("agent-gates"), group("ag-runner")
     gate = user("agent-gates", "agent-gates", True)
@@ -277,6 +327,8 @@ def init(repo_arg, agent_names):
         "--upload-pack=git-upload-pack", str(repo), base, env=git_env())
     run("git", "--git-dir", str(bare), "update-ref", "refs/heads/main", base)
     run("git", "--git-dir", str(bare), "config", "core.sharedRepository", "0640")
+    attributes = bare / "info/attributes"
+    attributes.write_text(ARCHIVE_ATTRIBUTES)
     hook = bare / "hooks/pre-receive"
     shutil.copyfile(CODE / "bin/pre-receive", hook)
     # Git may chmod a newly created object directory and drop its setgid bit
@@ -301,7 +353,7 @@ def init(repo_arg, agent_names):
         candidate.unlink(missing_ok=True)
     info = {"schema": 1, "version": VERSION, "project": project, "bare": str(bare),
             "users": [account.pw_name for account in accounts], "initial_main": base,
-            "code_sha256": hashes, "hook_sha256": sha(hook),
+            "code_sha256": hashes, "hook_sha256": sha(hook), "attributes_sha256": sha(attributes),
             "sudoers_sha256": hashlib.sha256(EXPECTED_SUDOERS.encode()).hexdigest()}
     manifest_path.write_text(json.dumps(info, sort_keys=True) + "\n")
     manifest_path.chmod(0o644); os.chown(manifest_path, 0, 0)
@@ -342,6 +394,15 @@ def doctor(project=None):
     check("system accounts cannot login", all(account.pw_shell in
           ("/usr/sbin/nologin", "/sbin/nologin", "/bin/false") and account.pw_dir == "/nonexistent"
           for account in (gate, runner)))
+    if os.geteuid() == 0:
+        check("runner has no crontab", not os.path.lexists("/var/spool/cron/crontabs/ag-runner"))
+        check("runner has no systemd linger", not os.path.lexists("/var/lib/systemd/linger/ag-runner"))
+        check("runner has no at jobs", not at_jobs())
+        for name in ("cron", "at"):
+            check("runner denied " + name, "ag-runner" in scheduler_users("/etc/" + name + ".deny")
+                  and "ag-runner" not in scheduler_users("/etc/" + name + ".allow"))
+    else:
+        check("runner scheduler/linger state", False, "privileged doctor required")
     all_members = set(agents.gr_mem) | {p.pw_name for p in pwd.getpwall() if p.pw_gid == agents.gr_gid}
     check("agents membership", bool(all_members) and all(re.fullmatch(r"agent-[a-z0-9-]+", name) for name in all_members))
     for name in sorted(all_members):
@@ -366,12 +427,15 @@ def doctor(project=None):
         except OSError:
             valid = False
         check("protected directory " + str(directory), valid)
-    try:
-        st = SUDOERS.lstat()
-        check("sudoers ownership/mode", stat.S_ISREG(st.st_mode) and st.st_uid == 0 and stat.S_IMODE(st.st_mode) == 0o440)
-    except OSError:
-        check("sudoers ownership/mode", False)
-    check("sudoers hash", SUDOERS.is_file() and sha(SUDOERS) == hashlib.sha256(EXPECTED_SUDOERS.encode()).hexdigest())
+    if os.geteuid() == 0:
+        try:
+            st = SUDOERS.lstat()
+            check("sudoers ownership/mode", stat.S_ISREG(st.st_mode) and st.st_uid == 0 and stat.S_IMODE(st.st_mode) == 0o440)
+            check("sudoers hash", sha(SUDOERS) == hashlib.sha256(EXPECTED_SUDOERS.encode()).hexdigest())
+        except OSError:
+            check("sudoers ownership/mode/hash", False)
+    else:
+        check("sudoers ownership/mode/hash", False, "privileged doctor required")
     projects = [project_name(project)] if project else [path.stem for path in sorted((CODE / "projects").glob("*.json"))]
     check("registered projects", bool(projects))
     for name in projects:
@@ -394,6 +458,12 @@ def doctor(project=None):
                 path = Path(root) / file; st = path.lstat()
                 # Git objects may remove owner write permission; never grant group/world write.
                 check("bare file " + str(path), stat.S_ISREG(st.st_mode) and st.st_uid == gate.pw_uid and st.st_gid == agents.gr_gid and not st.st_mode & 0o027 and bool(st.st_mode & stat.S_IRGRP))
+        attributes = bare / "info/attributes"
+        check("archive attributes " + name, attributes.is_file() and not attributes.is_symlink()
+              and attributes.stat().st_uid == gate.pw_uid
+              and stat.S_IMODE(attributes.stat().st_mode) == 0o640
+              and attributes.read_text() == ARCHIVE_ATTRIBUTES
+              and sha(attributes) == info.get("attributes_sha256"))
         hook = bare / "hooks/pre-receive"
         check("pre-receive hash " + name, hook.is_file() and sha(hook) == info["hook_sha256"])
     try:
