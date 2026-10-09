@@ -316,6 +316,25 @@ t23() {
   [ "$(value "$receipts/acceptance-$a.json" allow_policy_change)" = False ] &&
     [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] && "$cli" merge "$a"
 }
+t24() {
+  setup r24 || return 1
+  python3 - "$wt/large.txt" <<'PYTEST'
+import pathlib,sys
+pathlib.Path(sys.argv[1]).write_text("line\n"*999)
+PYTEST
+  git -C "$wt" add large.txt; git -C "$wt" commit -qm threshold || return 1
+  verify && [ "$(value "$receipts/verification-$v.json" risk)" = "[]" ] || return 1
+  echo extra >> "$wt/large.txt"
+  git -C "$wt" add large.txt; git -C "$wt" commit -qm large || return 1
+  verify && [ "$(value "$receipts/verification-$v.json" risk)" = "['LARGE_DIFF']" ] || return 1
+  echo dependency > "$wt/package-lock.json"
+  git -C "$wt" add package-lock.json; git -C "$wt" commit -qm lockfile || return 1
+  before="$(git -C "$r" rev-parse HEAD)"
+  verify && [ "$(value "$receipts/verification-$v.json" risk)" = "['LARGE_DIFF', 'LOCKFILE']" ] || return 1
+  output="$("$cli" accept "$v" --yes)" || return 1
+  [[ "$output" == *"HIGH_RISK: LARGE_DIFF, LOCKFILE"* ]] &&
+    [ "$(git -C "$r" rev-parse HEAD)" = "$before" ]
+}
 check "1 self verification" t1
 check "2 dirty main" t2
 check "3 rejected tests cannot be accepted" t3
@@ -339,5 +358,6 @@ check "test timeout rejects within ten seconds" t20
 check "changed tests recorded and warned" t21
 check "policy deny requires explicit recorded override at accept and merge" t22
 check "policy warn preserves acceptance without override" t23
+check "risk threshold and lockfiles displayed to Owner" t24
 echo; echo "$pass passed, $fail failed, $skipped skipped"
 [ "$fail" -eq 0 ]

@@ -267,6 +267,21 @@ class Gates:
             fnmatch.fnmatchcase(Path(path).name, "*_test.*") or
             Path(path).name in {"conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg",
                                 "tox.ini", "package.json"}))
+        risk_changed = git(self.repo, "diff", "--name-only", "--no-renames", "-z",
+                           base + "..." + head).split("\0")
+        numstat = git(self.repo, "diff", "--numstat", "--no-renames", "-z", base + "..." + head)
+        changed_lines = 0
+        for entry in numstat.split("\0"):
+            fields = entry.split("\t", 2)
+            if len(fields) == 3 and fields[0].isdigit() and fields[1].isdigit():
+                changed_lines += int(fields[0]) + int(fields[1])
+        risk = []
+        if changed_lines > 1000:
+            risk.append("LARGE_DIFF")
+        if any(Path(path).name.endswith(".lock") or Path(path).name in
+               {"package-lock.json", "poetry.lock", "Cargo.lock", "go.sum"}
+               for path in risk_changed if path):
+            risk.append("LOCKFILE")
         tree = self.merge_tree(base, head)
         commit = git(self.repo, "commit-tree", tree, "-p", base, "-p", head,
                      "-m", "agent-gates temporary verification")
@@ -279,7 +294,7 @@ class Gates:
             "branch": args.branch, "author": author, "verifier": args.verifier,
             "base_sha": base, "head_sha": head, "merge_tree": tree,
             "test_cmd": self.cfg["TEST_CMD"], "policy_files_changed": policy_files,
-            "test_files_changed": test_files,
+            "test_files_changed": test_files, "risk": risk,
             "result": result, "baseline": baseline,
             "verdict": "ACCEPT" if result["exit"] == 0 else "REJECT",
             "created_at": stamp(), "tool_version": VERSION,
@@ -331,6 +346,8 @@ class Gates:
                   ", ".join(verification["policy_files_changed"]))
         if verification.get("test_files_changed"):
             print("WARNING: branch changes tests: " + ", ".join(verification["test_files_changed"]))
+        if verification.get("risk"):
+            print("HIGH_RISK: " + ", ".join(verification["risk"]))
         if not args.yes and input("Accept this verification? Type yes: ").strip() != "yes":
             raise EnvironmentError_("acceptance not confirmed")
         # Owner may take time at the prompt; bind to current refs again before writing.
