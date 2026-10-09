@@ -47,8 +47,15 @@ def run(*args, data=None, env=None, uid=None):
     return p.stdout.strip()
 
 
+def git_env():
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    return env
+
+
 def git(repo, *args):
-    return run("git", "-C", str(repo), *args)
+    return run("/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+               "-C", str(repo), *args, env=git_env())
 
 
 def sha(path):
@@ -168,6 +175,22 @@ def pre_receive():
 def init(repo_arg, agent_names):
     if sys.platform != "linux" or os.geteuid() != 0:
         deny("ROOT_REQUIRED", "enforce init requires Linux root")
+    # Also guard direct invocation of this helper, before any provisioning.
+    source = Path(__file__).resolve().parent
+    paths = [source / name for name in
+             ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run")]
+    paths += [source, *source.parents]
+    trusted = (source.name == "bin" and ".agent-gates" not in source.parts
+               and ".agent-gates" not in Path(__file__).absolute().parts
+               and (source.parent / ".git").exists()
+               and (source.parent / "docs/spec/v0.4-enforced.md").is_file())
+    try:
+        trusted = trusted and all(not path.is_symlink() and path.lstat().st_uid == 0
+                                  and not path.lstat().st_mode & 0o022 for path in paths)
+    except OSError:
+        trusted = False
+    if not trusted:
+        deny("UNTRUSTED_SOURCE", "enforce init requires a protected root-owned kit checkout")
     for command in ("git", "sudo", "visudo", "ssh-keygen", "useradd", "groupadd", "runuser", "pkill"):
         if not shutil.which(command):
             deny("MISSING_DEPENDENCY", command)
@@ -249,7 +272,9 @@ def init(repo_arg, agent_names):
     allowed.write_text("root " + owner_public + "\n"); allowed.chmod(0o644); os.chown(allowed, 0, 0)
     # Seed only current main, never refs supplied by an agent or worktree state.
     run("git", "init", "--bare", "--initial-branch=main", str(bare))
-    run("git", "--git-dir", str(bare), "fetch", "--no-tags", str(repo), base)
+    run("/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+        "-c", "protocol.file.allow=always", "--git-dir", str(bare), "fetch", "--no-tags",
+        "--upload-pack=git-upload-pack", str(repo), base, env=git_env())
     run("git", "--git-dir", str(bare), "update-ref", "refs/heads/main", base)
     run("git", "--git-dir", str(bare), "config", "core.sharedRepository", "0640")
     hook = bare / "hooks/pre-receive"
@@ -300,6 +325,7 @@ def doctor(project=None):
         if not condition:
             failures += 1
         print(("OK " if condition else "NOT ENFORCED ") + label + (": " + detail if detail else ""))
+    check("/usr/bin/git-receive-pack exists", Path("/usr/bin/git-receive-pack").is_file())
     version = re.search(r"(\d+)\.(\d+)", run("git", "--version"))
     check("Git >= 2.38", bool(version and tuple(map(int, version.groups())) >= (2, 38)))
     try:

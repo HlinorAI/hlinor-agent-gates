@@ -3,6 +3,10 @@
 set -euo pipefail
 [ -f /.dockerenv ] || [ -f /run/.containerenv ] || { echo 'STOP: disposable container required'; exit 2; }
 [ "$(id -u)" = 0 ] || exit 2
+# Prepare the trusted distribution inside the disposable container only.
+cp -R /kit /trusted-kit
+chown -R root:root /trusted-kit
+chmod -R go-w /trusted-kit
 mkdir -p /tmp/project
 cd /tmp/project
 git init -q -b main
@@ -14,13 +18,34 @@ git add message.txt check.sh
 git commit -qm initial
 bash /kit/init.sh /tmp/project --agents codex,claude,zcode --test-cmd 'bash check.sh' >/tmp/cooperative-init.log
 base="$(git rev-parse HEAD)"
-bash /tmp/project/.agent-gates/agent-gates enforce init /tmp/project --agents codex,claude,zcode > /tmp/enforce-init.log 2>&1 || { cat /tmp/enforce-init.log; exit 1; }
+# An old cooperative copy may contain an attacker-controlled enforced module.
+printf 'open("/tmp/untrusted-module-ran", "w").write("executed")\n' > .agent-gates/enforced.py
+if bash .agent-gates/agent-gates enforce init /tmp/project --agents codex,claude,zcode >/tmp/untrusted-init.log 2>&1; then exit 1; fi
+grep -q '^DENY UNTRUSTED_SOURCE:' /tmp/untrusted-init.log
+test ! -e /tmp/untrusted-module-ran
+test ! -e /opt/agent-gates
+test ! -e /srv/agent-gates
+test ! -e /var/lib/agent-gates
+test ! -e /etc/sudoers.d/agent-gates
+test "$(git rev-parse HEAD)" = "$base"
+rm .agent-gates/enforced.py
+printf 'PASS untrusted cooperative source rejected before execution or installation\n'
+# fsmonitor is a command in an untrusted local Git config, not a trusted test.
+printf '#!/bin/sh\ntouch /tmp/fsmonitor-ran\n' > /tmp/evil-fsmonitor
+chmod +x /tmp/evil-fsmonitor
+git config core.fsmonitor /tmp/evil-fsmonitor
+bash /trusted-kit/bin/agent-gates enforce init /tmp/project --agents codex,claude,zcode > /tmp/enforce-init.log 2>&1 || { cat /tmp/enforce-init.log; exit 1; }
+test ! -e /tmp/fsmonitor-ran
+test "$(git -c core.fsmonitor=false rev-parse HEAD)" = "$base"
+! grep -q 'untrusted-module-ran' /opt/agent-gates/bin/enforced.py
+git -c core.fsmonitor=false config --unset core.fsmonitor
+printf 'PASS source Git fsmonitor ignored and main unchanged\n'
 /opt/agent-gates/bin/agent-gates doctor project > /tmp/doctor.log 2>&1 || { cat /tmp/doctor.log; exit 1; }
 test "$(git --git-dir=/srv/agent-gates/project.git rev-parse main)" = "$base"
 visudo -c > /tmp/visudo.log
 printf 'PASS initialization, bare main, full doctor and sudoers\n'
 before="$(sha256sum /etc/sudoers.d/agent-gates /opt/agent-gates/projects/project.json /var/lib/agent-gates/gate_ed25519)"
-bash /kit/bin/agent-gates enforce init /tmp/project --agents codex,claude,zcode > /tmp/enforce-again.log 2>&1
+bash /trusted-kit/bin/agent-gates enforce init /tmp/project --agents codex,claude,zcode > /tmp/enforce-again.log 2>&1
 test "$(sha256sum /etc/sudoers.d/agent-gates /opt/agent-gates/projects/project.json /var/lib/agent-gates/gate_ed25519)" = "$before"
 printf 'PASS idempotent init\n'
 for name in codex claude zcode; do
@@ -61,4 +86,4 @@ if /opt/agent-gates/bin/agent-gates doctor project >/tmp/root-cli-doctor.log 2>&
 kill "$impostor"; wait "$impostor" || true
 grep -q 'NOT ENFORCED no agent CLI running as root' /tmp/root-cli-doctor.log
 printf 'PASS doctor rejects root agent CLI\n'
-printf '8 passed, 0 failed (phase A container smoke)\n'
+printf '10 passed, 0 failed (phase A container smoke)\n'

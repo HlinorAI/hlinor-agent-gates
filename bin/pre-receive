@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
 set -euo pipefail
-exec /usr/bin/python3 /opt/agent-gates/bin/enforced.py pre-receive
+exec /usr/bin/python3 -I /opt/agent-gates/bin/enforced.py pre-receive

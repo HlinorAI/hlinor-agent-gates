@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
-exec python3 "$HERE/agent_gates.py" "$@"
+exec /usr/bin/python3 -I "$HERE/agent_gates.py" "$@"
