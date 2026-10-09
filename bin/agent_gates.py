@@ -17,7 +17,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 
 
 class Deny(Exception):
@@ -482,6 +482,11 @@ class Gates:
 
 
 def main():
+    # Protected installed entry point never falls back to cooperative repository code.
+    installed = Path(__file__).resolve().parent == Path("/opt/agent-gates/bin")
+    if installed or (len(sys.argv) > 1 and sys.argv[1] in ("enforce", "doctor")):
+        import enforced
+        return enforced.main(sys.argv[1:])
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
     verify = commands.add_parser("verify")

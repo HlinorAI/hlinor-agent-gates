@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Phase A intentionally grants no runnable test execution until phase B.
+echo 'DENY ENFORCED_PHASE_NOT_IMPLEMENTED: runner is unavailable until phase B' >&2
+exit 1
