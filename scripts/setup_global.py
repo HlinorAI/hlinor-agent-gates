@@ -69,7 +69,7 @@ def main():
     kit.mkdir(parents=True, exist_ok=True)
     # Copy distributable kit content only; never copy Git state or personal artifacts.
     for name in ('bin', 'templates', 'scripts', 'docs', 'tests', '.github',
-                 'init.sh', 'setup-global.sh', 'README.md', 'CHANGELOG.md', 'LICENSE'):
+                 'init.sh', 'setup-global.sh', 'README.md', 'THREAT_MODEL.md', 'CHANGELOG.md', 'LICENSE'):
         src = source / name
         if not src.exists():
             continue

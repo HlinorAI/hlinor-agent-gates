@@ -17,7 +17,7 @@
 #   --dry-run             print what would happen, change nothing
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 INSTALL_ARGS=("$@")
 KIT="$(cd "$(dirname "$0")" && pwd)"
 die() { echo "ERROR: $*" >&2; exit 1; }
