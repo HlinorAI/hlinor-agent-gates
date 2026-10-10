@@ -112,7 +112,7 @@ def receipt(record, kind):
     require(record.get('id') == identifier(record), 'receipt id/hash mismatch')
 
 
-def check_merge(repo, commit, owner_key, used, expected_base=None):
+def check_merge(repo, commit, accept_keys, used, expected_base=None):
     message = git(repo, 'show', '-s', '--format=%B', commit).decode()
     require(message.startswith('agent-gates merge'), 'commit is not a gate merge')
     bundle = note(repo, RECEIPTS, commit)
@@ -132,7 +132,17 @@ def check_merge(repo, commit, owner_key, used, expected_base=None):
     require(time_value(a['created_at']) <= time_value(m['created_at']) <= time_value(a['expires_at']),
             'merge outside acceptance lifetime')
     require(time_value(v['created_at']) <= time_value(a['created_at']), 'acceptance predates verification')
-    verify_signature(a, owner_key, a.get('owner'), 'agent-gates')
+    keys = [line.strip() for line in accept_keys.splitlines() if line.strip()]
+    require(keys, 'AGENT_GATES_ACCEPT_KEYS missing for gate merge')
+    accepted = False
+    for key in keys:
+        try:
+            verify_signature(a, key, a.get('owner'), 'agent-gates')
+            accepted = True
+            break
+        except Invalid:
+            continue
+    require(accepted, 'acceptance signature does not match AGENT_GATES_ACCEPT_KEYS')
     tree = git(repo, 'show', '-s', '--format=%T', commit).decode().strip()
     parents = git(repo, 'show', '-s', '--format=%P', commit).decode().split()
     require(tree == v.get('merge_tree'), 'merge tree mismatch')
@@ -196,12 +206,13 @@ def attest(repo, old, new, key, name):
     return record
 
 
-def check(repo, event, before, after, owner_key, name, rows=None, bundles=None):
-    require(bool(owner_key.strip()), 'AGENT_GATES_OWNER_KEY missing')
+def check(repo, event, before, after, owner_key, name, rows=None, bundles=None, accept_keys=None):
+    accept_keys = os.environ.get('AGENT_GATES_ACCEPT_KEYS', '') if accept_keys is None else accept_keys
     used = set()
     rows = [] if rows is None else rows
     bundles = {} if bundles is None else bundles
     if event == 'push':
+        require(bool(owner_key.strip()), 'AGENT_GATES_OWNER_KEY missing')
         require(re.fullmatch(r'[0-9a-f]{40,64}', before or '') and
                 re.fullmatch(r'[0-9a-f]{40,64}', after or ''), 'invalid event range')
         require(set(before) != {'0'}, 'initial push has no attested base')
@@ -219,7 +230,7 @@ def check(repo, event, before, after, owner_key, name, rows=None, bundles=None):
             message = git(repo, 'show', '-s', '--format=%B', commit).decode()
             if message.startswith('agent-gates merge'):
                 bundles[commit] = note(repo, RECEIPTS, commit)
-                row, bundle = check_merge(repo, commit, owner_key, used)
+                row, bundle = check_merge(repo, commit, accept_keys, used)
                 rows.append(row)
                 bundles[commit] = bundle
             else:
@@ -228,7 +239,7 @@ def check(repo, event, before, after, owner_key, name, rows=None, bundles=None):
                              'verifier': '', 'tests': '', 'acceptance_id': '', 'result': 'PASS'})
     else:
         bundles[after] = note(repo, RECEIPTS, after)
-        row, bundle = check_merge(repo, after, owner_key, used, before)
+        row, bundle = check_merge(repo, after, accept_keys, used, before)
         rows.append(row)
         bundles[after] = bundle
     return rows, bundles

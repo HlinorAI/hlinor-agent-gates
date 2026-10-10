@@ -46,10 +46,12 @@ class Fixture:
         self.temp = Path(temp)
         self.repo = self.temp / 'repo'
         self.repo.mkdir()
-        for name in ('owner', 'other', 'gate'):
+        for name in ('owner', 'publish', 'other', 'gate'):
             run('ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', self.temp / name)
         self.key = self.temp / 'owner'
-        self.anchor = self.key.with_suffix('.pub').read_text()
+        self.accept_keys = self.key.with_suffix('.pub').read_text()
+        self.publish_key = self.temp / 'publish'
+        self.anchor = self.publish_key.with_suffix('.pub').read_text()
         g(self.repo, 'init', '-q', '-b', 'main')
         g(self.repo, 'config', 'user.name', 'fixture')
         g(self.repo, 'config', 'user.email', 'fixture@local')
@@ -57,7 +59,7 @@ class Fixture:
         policy.mkdir()
         for name in ('agent-gates', 'agent_gates.py', 'github_verify.py'):
             shutil.copy2(KIT / 'bin' / name, policy / name)
-        (policy / 'allowed_signers').write_text('owner ' + self.anchor)
+        (policy / 'allowed_signers').write_text('owner ' + self.accept_keys)
         (policy / 'config').write_text('MAIN_BRANCH=main\nTEST_CMD="echo fixture passed"\nOWNER_NAME=owner\n'
                                      'OWNER_SIGNING_KEY="' + str(self.key) + '"\n')
         g(self.repo, 'add', '.')
@@ -81,10 +83,11 @@ class Fixture:
 
     def attest(self, key=None, new=None):
         run(self.repo / '.agent-gates/agent-gates', 'publish', 'attest', self.base, new or self.head,
-            '--key', key or self.key, cwd=self.repo)
+            '--key', key or self.publish_key, cwd=self.repo)
 
-    def check(self, ok, event='push', head=None, base=None, anchor=None):
-        env = {**os.environ, 'AGENT_GATES_OWNER_KEY': self.anchor if anchor is None else anchor}
+    def check(self, ok, event='push', head=None, base=None, anchor=None, accept_keys=None):
+        env = {**os.environ, 'AGENT_GATES_OWNER_KEY': self.anchor if anchor is None else anchor,
+               'AGENT_GATES_ACCEPT_KEYS': self.accept_keys if accept_keys is None else accept_keys}
         out = self.temp / 'report'
         result = subprocess.run([sys.executable, '-I', str(KIT / 'bin/github_verify.py'), '--repo', str(self.repo),
                                  '--event', event, '--before', base or self.base, '--after', head or self.head,
@@ -120,7 +123,7 @@ def t3(f):
 def t4(f):
     original = C.note(f.repo, C.PUBLISH, f.head)
     for field, value in [('new_main', f.base), ('old_main', f.head), ('commits', [])]:
-        changed = sign({**original, field: value}, f.key, 'agent-gates-publish')
+        changed = sign({**original, field: value}, f.publish_key, 'agent-gates-publish')
         changed.pop('id')  # attestations have no receipt ID
         put(f.repo, C.PUBLISH, f.head, changed)
         f.check(False)
@@ -175,6 +178,7 @@ def t8(f):
 
 def t9(f):
     f.check(True, event='pull_request')
+    f.check(True, event='pull_request', anchor='')
     f.check(False, event='pull_request', base=f.bundle['verification']['head_sha'])
 
 
@@ -225,15 +229,42 @@ def binding(f):
     f.check(False)
 
 
+
+def two_keys(f):
+    # A publish key is never an acceptance anchor unless explicitly pinned there.
+    bundle = copy.deepcopy(f.bundle)
+    bundle['acceptance'] = sign(bundle['acceptance'], f.publish_key, 'agent-gates')
+    bundle['merge']['acceptance_id'] = bundle['acceptance']['id']
+    bundle['merge']['id'] = C.identifier(bundle['merge'])
+    f.note(bundle)
+    f.check(False)
+    f.note(f.bundle)
+    f.check(True)
+    f.check(True, accept_keys=(f.temp / 'other.pub').read_text() + f.accept_keys)
+    f.check(False, accept_keys='')
+
+
+def owner_only(f):
+    (f.repo / 'owner-change').write_text('Owner change')
+    g(f.repo, 'add', 'owner-change')
+    g(f.repo, 'commit', '-qm', 'Owner direct change')
+    base = f.head
+    head = g(f.repo, 'rev-parse', 'HEAD')
+    run(f.repo / '.agent-gates/agent-gates', 'publish', 'attest', base, head,
+        '--key', f.publish_key, cwd=f.repo)
+    f.check(True, head=head, base=base, accept_keys='')
+
+
 for name, test in [(f'{i} spec fixture', t) for i, t in enumerate((t1,t2,t3,t4,t5,t6,t7,t8,t9), 1)] + \
-                  [('enforced signatures and gate key binding', enforced), ('self verification and expired acceptance', binding)]:
+                  [('enforced signatures and gate key binding', enforced), ('self verification and expired acceptance', binding),
+                   ('separate acceptance anchors', two_keys), ('Owner-only range without acceptance keys', owner_only)]:
     try:
         with tempfile.TemporaryDirectory(prefix='agent-gates-github-test-') as temp:
             f = Fixture(temp)
             before = g(f.repo, 'rev-parse', 'main')
             test(f)
             # Checks/attestations never advance main, except intentional fixture attack #5.
-            if test is not t5:
+            if test not in (t5, owner_only):
                 assert g(f.repo, 'rev-parse', 'main') == before
         passed += 1
         print('PASS ' + name, flush=True)
