@@ -229,7 +229,7 @@ def init(repo_arg, agent_names):
     # Also guard direct invocation of this helper, before any provisioning.
     source = Path(__file__).resolve().parent
     paths = [source / name for name in
-             ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py", "github_verify.py")]
+             ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py", "github_verify.py", "github_protect.py")]
     paths += [source, *source.parents]
     trusted = (source.name == "bin" and ".agent-gates" not in source.parts
                and ".agent-gates" not in Path(__file__).absolute().parts
@@ -285,7 +285,7 @@ def init(repo_arg, agent_names):
     secure_dir(CODE / "bin", 0, 0, 0o755)
     source = Path(__file__).resolve().parent
     hashes = {}
-    for name in ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py", "github_verify.py"):
+    for name in ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py", "github_verify.py", "github_protect.py"):
         path = source / name
         if not path.is_file() or path.is_symlink():
             deny("MISSING_DEPENDENCY", "trusted kit file missing: " + name)

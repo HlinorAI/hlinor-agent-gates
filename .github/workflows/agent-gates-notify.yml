@@ -1,0 +1,27 @@
+# A separate trusted run can open issues even when the failed PR came from a fork.
+name: agent-gates notification
+on:
+  workflow_run:
+    workflows: [agent-gates verification]
+    types: [completed]
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: agent-gates-unverified-issue
+  cancel-in-progress: false
+jobs:
+  notify:
+    name: agent-gates/notify
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Open or update the unverified issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: python3 -IB bin/github_issue.py --repository "$REPOSITORY" --run-url "$RUN_URL"

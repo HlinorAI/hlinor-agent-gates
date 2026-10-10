@@ -24,9 +24,13 @@ jobs:
         run: bash tests/test_gates.sh
       - name: Automatic setup (Linux and macOS)
         run: bash tests/test_setup.sh
+      - name: GitHub verification and fake gh (offline, both OSes)
+        run: bash tests/test_github.sh && bash tests/test_github_tools.sh
   enforced:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - name: Enforced mode (disposable Linux container)
         run: bash tests/test_enforced.sh
+      - name: GitHub receipt notes (disposable Linux container)
+        run: bash tests/test_github_enforced.sh

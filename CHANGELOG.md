@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0 — 2026-10-10
+
+- Owner amendment: PR checks are advisory. Required-check names do not pin a PR workflow; the Owner must review workflow/checker changes. Main detection and notification require the verification workflow to remain enabled and unchanged.
+
+- Gate merges carry unchanged canonical verification, acceptance and merge receipts in refs/notes/agent-gates, in both cooperative and enforced modes.
+- Owner publish attestations bind the exact first-parent range and use the Mac-only publish key in namespace agent-gates-publish.
+- GitHub verification pins separate settings variables for the publish key (AGENT_GATES_OWNER_KEY) and acceptance keys (AGENT_GATES_ACCEPT_KEYS); repository files cannot replace them.
+- The offline stdlib checker validates receipt IDs/hashes, signatures, expiry, identities, tree/parents, policy and acceptance replay; it reports cooperative verification as UNSIGNED VERIFICATION.
+- Added agent-gates/verify check, 90-day receipt artifacts and a trusted workflow_run notifier that opens or updates one unverified issue on failure, including fork PR failures.
+- Owner github protect preserves existing protection requirements and CI checks, disables force pushes/deletions, pins public keys and requires an old-key signature for publish key rotation.
+- Owner publish script fetches server receipt notes, asks for confirmation, attests and atomically pushes main and both note refs with a lease on the reviewed GitHub base.
+- Added offline fixture/fake-gh tests and container note integration. Live GitHub end-to-end validation is reserved for the Owner before release; no macOS CI result is claimed.
+
 ## 0.4.0 — 2026-10-09
 
 - Added opt-in Linux enforced mode with separate agent, gate and runner OS users, protected bare repositories and restricted push hooks.

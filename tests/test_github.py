@@ -179,6 +179,7 @@ def t8(f):
 def t9(f):
     f.check(True, event='pull_request')
     f.check(True, event='pull_request', anchor='')
+    assert 'PR result is advisory' in (f.temp / 'report/summary.md').read_text()
     f.check(False, event='pull_request', base=f.bundle['verification']['head_sha'])
 
 

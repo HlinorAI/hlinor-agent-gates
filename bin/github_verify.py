@@ -275,6 +275,8 @@ def main():
         error = str(exc)
         rows.append({'commit': args.after, 'kind': args.event, 'result': 'FAIL'})
     report = summary(rows, error)
+    if args.event == 'pull_request':
+        report = ('PR result is advisory: v0.5 does not enforce workflow integrity.\n\n' + report)
     (output / 'summary.md').write_text(report)
     (output / 'receipts.json').write_bytes(canonical(bundles))
     (output / 'result.json').write_bytes(canonical({'ok': error is None, 'error': error, 'rows': rows}))

@@ -1,0 +1,66 @@
+name: agent-gates verification
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  verify:
+    name: agent-gates/verify
+    runs-on: ubuntu-latest
+    steps:
+      # Execute the base checker, but the PR can change this workflow itself.
+      # PR enforcement is advisory in v0.5 (spec Amendment 2).
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          path: candidate
+      - name: Fetch receipt and publish notes
+        working-directory: candidate
+        shell: bash
+        run: |
+          for ref in refs/notes/agent-gates refs/notes/agent-gates-publish; do
+            rc=0
+            git ls-remote --exit-code origin "$ref" >/dev/null || rc=$?
+            if [ "$rc" = 0 ]; then
+              git fetch origin "+$ref:$ref"
+            elif [ "$rc" != 2 ]; then
+              exit "$rc"
+            fi
+          done
+      - name: Check pinned signatures and receipts
+        id: receipts
+        env:
+          AGENT_GATES_OWNER_KEY: ${{ vars.AGENT_GATES_OWNER_KEY }}
+          AGENT_GATES_ACCEPT_KEYS: ${{ vars.AGENT_GATES_ACCEPT_KEYS }}
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 -IB trusted/bin/github_verify.py --repo candidate --event "$EVENT" \
+            --before "$BEFORE" --after "$AFTER" --repository "$REPOSITORY" \
+            --output "$RUNNER_TEMP/agent-gates-report"
+      - name: Check summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/agent-gates-report/summary.md" ]; then
+            cat "$RUNNER_TEMP/agent-gates-report/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'agent-gates/verify failed before receipt validation.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-gates-receipts
+          path: ${{ runner.temp }}/agent-gates-report/
+          retention-days: 90

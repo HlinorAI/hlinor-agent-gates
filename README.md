@@ -227,6 +227,8 @@ Be precise about this, because the name says "gates".
 | Owner authenticity | ✅ SSH signature when enabled | unsigned acceptances; Verifier identity is supplied with `--as` |
 | Only Git Agent can move main | | ⚠️ separate OS users/clones are not part of v0.2 |
 | No push | | ⚠️ `GIT_POLICY.md` |
+| GitHub attestation and receipt validation | ✅ trusted checker pins settings keys and exact evidence | detection requires the workflow to remain enabled and unchanged |
+| GitHub PR receipt gate | | ⚠️ advisory in v0.5; a PR can replace its workflow while preserving the required-check name |
 
 In cooperative mode, an agent running as the same OS user as you **can** ignore the policy rows, and can remove a lock flag it is able to set. Worktrees share one `.git`, so any agent that can commit can also move `main`. Real enforcement needs agents in separate clones under separate OS users, with merges allowed only against a signed approval receipt bound to the reviewed commit SHA. Linux enforced mode below makes separate OS users and signed approvals the only gate path; cooperative mode supplies CLI checks.
 
@@ -309,7 +311,7 @@ these checks. Cleanup runs as ag-runner, never root, and fails closed if tempora
 files or live processes remain. No extra sudo rights are granted.
 
 Root or a root-launched agent can bypass the boundary. Network isolation and
-GitHub enforcement are outside this mode. The Owner must not enable alternative
+the GitHub layer below remain separate from OS enforcement. The Owner must not enable alternative
 schedulers or change runner permissions after setup. Use cooperative mode on macOS;
 Windows is unsupported. Review [THREAT_MODEL.md](THREAT_MODEL.md) for the remaining
 policy assumptions.
@@ -322,3 +324,95 @@ bash tests/test_enforced.sh
 
 This script requires a working Docker or Podman runtime; it provisions only inside
 the container, mounts the kit read-only, and removes the container afterward.
+
+
+## GitHub integration (v0.5)
+
+The GitHub layer checks evidence for Owner/admin pushes and provides **advisory PR
+verification**. Detection requires the verification workflow to remain enabled and unchanged. `agent-gates/verify` runs on main pushes and PRs into main.
+For PRs, it runs the checker from the trusted base commit and treats the PR tree as
+Git data. The trusted checker requires a gate merge on the current PR base and its
+receipt note. The workflow file itself comes from the PR merge commit: an author
+can replace its steps while keeping the required check name. Required checks by
+name therefore do not enforce receipt validation against a hostile PR author.
+The Owner must review changes to workflows and checker code. A separately pinned
+trusted workflow/ruleset is outside v0.5.
+
+Two public-key variables come from GitHub repository settings, never from a commit:
+
+- `AGENT_GATES_OWNER_KEY`: the Mac-only publish key. Every push attestation binds
+  repository, previous/new main SHA and the ordered first-parent commit list.
+- `AGENT_GATES_ACCEPT_KEYS`: acceptance public keys, one per line, for server-side
+  Owner acceptance signatures. A gate merge without this variable fails. A purely
+  Owner-attested range with no gate merges needs no acceptance key.
+
+Keep the Mac private key outside agents' reach. Copy only the server acceptance
+**public** key to the Mac; do not copy the Mac private key to the server. An
+acceptance signature made on a cooperative/root-accessible server binds receipt
+bytes to a known key; the Mac publish signature remains the push trust anchor.
+
+Owner/admin setup on the Mac (after existing CI has run at least once):
+
+```bash
+./bin/agent-gates github protect --owner-key /private/path/publish.pub \
+  --accept-keys /private/path/acceptance-public-keys.txt
+# gh must already be authenticated as repository admin.
+```
+
+`github protect` preserves existing required checks, review/restriction settings
+and discovers current CI check names from main, then adds `agent-gates/verify` and
+forbids force pushes and deletion. `--repository owner/repo` selects another repo.
+It prints the resulting protection JSON and is idempotent. A different pinned
+publish key yields `DENY OWNER_KEY_CHANGED` before writes.
+
+Rotation requires `--rotate --rotation-signature <file>`. Sign the canonical JSON
+below (sorted keys, compact separators, UTF-8, no trailing newline) with the old
+private key using `ssh-keygen -Y sign -n agent-gates-publish`:
+
+```json
+{"kind":"owner-key-rotation","new_key":"ssh-ed25519 <new-base64>","old_key":"ssh-ed25519 <old-base64>","repo":"HlinorAI/hlinor-agent-gates","schema":1,"signature":null}
+```
+
+Pass the new public key through `--owner-key`. The signature authorizes that exact
+repository and key pair; an absent or invalid old-key signature refuses rotation.
+
+Publish from the Owner's clean main checkout on the Mac, with an existing origin:
+
+```bash
+./scripts/publish.sh --source owner@dev-host:/path/to/server-repository \
+  --key /private/path/publish --repository HlinorAI/hlinor-agent-gates
+```
+
+The script fast-forwards from the explicit server source, fetches receipt notes,
+reads GitHub's current main, displays the first-parent commit list and asks `y`.
+It calls `agent-gates publish attest <old> <new> --key <path>` and atomically pushes
+the exact main SHA, `refs/notes/agent-gates` and `refs/notes/agent-gates-publish`.
+A lease refuses a concurrent change to the reviewed GitHub base. Signing alone is
+local: `publish attest` never pushes or calls GitHub API.
+
+The check validates receipt hashes/IDs, acceptance key and lifetime, independent
+verifier, tree and ordered parents, policy and acceptance reuse within the range.
+Enforced receipts also require gate signatures: Owner acceptance binds the signed
+verification bytes, and its embedded SSHSIG public key must also verify the merge.
+Cooperative receipts display `UNSIGNED VERIFICATION`, while acceptance must still
+be signed by a configured acceptance key.
+
+The check writes a summary and a receipt artifact retained for 90 days. A separate
+trusted notification workflow opens or updates one issue titled
+`agent-gates: main is unverified` after a failed verification run. It uses default-
+branch code and never executes or downloads PR artifacts; fork PRs need no write
+permissions. Notifications beyond this issue remain out of scope.
+
+Admin pushes cannot be rejected by content: a red check is detection, requiring
+someone to review the failure. Branch protection restricts non-admin direct pushes;
+PR results remain advisory even when agent-gates/verify is a required check. Losing the Mac key requires an authorized
+rotation; leaking it permits forged publish attestations. The Owner must perform
+one scratch-repository end-to-end run before release.
+
+Offline validation (no GitHub calls, only temporary test keys):
+
+```bash
+bash tests/test_github.sh
+bash tests/test_github_tools.sh       # fake gh and fake publication git in PATH
+bash tests/test_github_enforced.sh    # disposable Linux container only
+```
