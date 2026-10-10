@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -151,6 +152,30 @@ with tempfile.TemporaryDirectory(prefix='agent-gates-tools-') as temp:
         assert len(read()['issues'])==1
         assert read()['issues'][0]['title']=='agent-gates: main is unverified'
         assert 'runs/2' in read()['issues'][0]['body']
+    def notify_condition():
+        # Read the actual YAML job condition without adding a YAML dependency.
+        workflow = (KIT / '.github/workflows/agent-gates-notify.yml').read_text()
+        job = re.search(r'^  notify:\n((?:    .*\n|\n)+)', workflow, re.MULTILINE)
+        assert job, 'notify job missing'
+        conditions = re.findall(r'^    if: (.+)$', job.group(1), re.MULTILINE)
+        expected = ("github.event.workflow_run.conclusion == 'failure' && "
+                    "github.event.workflow_run.event == 'push' && "
+                    "github.event.workflow_run.head_branch == 'main'")
+        assert conditions == [expected], 'notify must be limited to failed main pushes'
+        clauses = []
+        for part in conditions[0].split(' && '):
+            match = re.fullmatch(r"github\.event\.workflow_run\.(\w+) == '([^']+)'", part)
+            assert match, 'unsupported notification condition'
+            clauses.append(match.groups())
+        for conclusion, event, branch, should_notify in (
+            ('failure', 'push', 'main', True),
+            ('failure', 'pull_request', 'main', False),
+            ('failure', 'push', 'agent/codex', False),
+            ('success', 'push', 'main', False),
+            ('failure', 'workflow_dispatch', 'main', False),
+        ):
+            fields = dict(conclusion=conclusion, event=event, head_branch=branch)
+            assert all(fields[field] == value for field, value in clauses) == should_notify
     def publication():
         # Fake Git records the intended effect. No remote is created, no real push occurs.
         args=['bash',KIT/'scripts/publish.sh','--source','fixture-source','--key',temp/'owner']
@@ -165,7 +190,9 @@ with tempfile.TemporaryDirectory(prefix='agent-gates-tools-') as temp:
         assert any('agent-gates-publish' in ' '.join(a) for a in calls)
     for name,test in [('10 idempotent protection and foreign key denial',t10),('signed explicit key rotation',rotation),
                       ('admin and missing CI fail before writes',admin_missing_ci),
-                      ('failure opens one issue and updates it',issue),('confirmed atomic publication via fake git',publication)]:
+                      ('failure opens one issue and updates it',issue),
+                      ('YAML notifier accepts only failed main pushes',notify_condition),
+                      ('confirmed atomic publication via fake git',publication)]:
         try:
             test(); passed+=1; print('PASS '+name,flush=True)
         except Exception as exc:

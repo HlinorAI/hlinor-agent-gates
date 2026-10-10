@@ -399,9 +399,9 @@ be signed by a configured acceptance key.
 
 The check writes a summary and a receipt artifact retained for 90 days. A separate
 trusted notification workflow opens or updates one issue titled
-`agent-gates: main is unverified` after a failed verification run. It uses default-
-branch code and never executes or downloads PR artifacts; fork PRs need no write
-permissions. Notifications beyond this issue remain out of scope.
+`agent-gates: main is unverified` only after a failed push to `main`. It uses default-
+branch code and never executes or downloads PR artifacts. PR failures do not open
+this issue. Notifications beyond this issue remain out of scope.
 
 Admin pushes cannot be rejected by content: a red check is detection, requiring
 someone to review the failure. Branch protection restricts non-admin direct pushes;
