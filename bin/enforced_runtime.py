@@ -531,6 +531,11 @@ class Gates:
         # Durable intent precedes the ref change, so a crash never leaves an unaudited merge.
         pending = self.directory / ("pending-" + record["id"] + ".json")
         self.persist(pending, canonical(record))
+        # Notes precede the CAS: orphan notes on failure are harmless; successful
+        # merges always carry the unchanged canonical receipt bytes.
+        blob = self.git("hash-object", "-w", "--stdin", data=canonical(
+            {"verification": verification, "acceptance": acceptance, "merge": record}))
+        self.git("notes", "--ref=refs/notes/agent-gates", "add", "-C", blob, commit)
         transaction = ("start\nverify refs/heads/" + verification["branch"] + " " + verification["head_sha"]
                        + "\nupdate refs/heads/main " + commit + " " + verification["base_sha"] + "\nprepare\ncommit\n")
         result = self.git_result("update-ref", "--stdin", data=transaction.encode())

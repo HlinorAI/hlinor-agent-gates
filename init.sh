@@ -231,6 +231,7 @@ install -m 755 "$KIT/templates/add_agent.sh" "$REPO/.agent-gates/add_agent.sh"
 install -m 755 "$KIT/templates/backup.sh"    "$REPO/.agent-gates/backup.sh"
 install -m 755 "$KIT/bin/agent-gates" "$REPO/.agent-gates/agent-gates"
 install -m 644 "$KIT/bin/agent_gates.py" "$REPO/.agent-gates/agent_gates.py"
+install -m 644 "$KIT/bin/github_verify.py" "$REPO/.agent-gates/github_verify.py"
 MAIN_BRANCH="$MAIN_BRANCH" WT_ROOT="$WT_ROOT" BACKUP_DIR="$BACKUP_DIR" \
 TEST_CMD="$TEST_CMD" OWNER_NAME="$OWNER" python3 - "$REPO/.agent-gates/config" <<'CONFIG'
 import os, shlex, sys

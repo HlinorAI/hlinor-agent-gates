@@ -19,7 +19,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 
 class Deny(Exception):
@@ -442,6 +442,11 @@ class Gates:
         record = self.write({"kind": "merge", "schema": 1, "acceptance_id": acceptance["id"],
                              "merge_commit": commit, "merged_by": os.environ.get("USER", "unknown"),
                              "created_at": stamp()})
+        bundle = canonical({"verification": verification, "acceptance": acceptance, "merge": record})
+        blob = run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"], data=bundle)
+        if blob.returncode:
+            raise EnvironmentError_("could not store receipt note")
+        git(self.repo, "notes", "--ref=refs/notes/agent-gates", "add", "-C", blob.stdout.decode().strip(), commit)
         print(record["id"])
 
     def status(self, args):
@@ -484,6 +489,23 @@ class Gates:
 
 
 def main():
+    if sys.argv[1:3] == ["publish", "attest"]:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("old")
+        parser.add_argument("new")
+        parser.add_argument("--key", required=True)
+        parser.add_argument("--repository", default="HlinorAI/hlinor-agent-gates")
+        args = parser.parse_args(sys.argv[3:])
+        spec = importlib.util.spec_from_file_location("github_verify", Path(__file__).resolve().parent / "github_verify.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        try:
+            record = module.attest(Path.cwd(), args.old, args.new, args.key, args.repository)
+            print("\n".join(record["commits"]))
+            return 0
+        except (module.Invalid, OSError, ValueError) as exc:
+            print("DENY PUBLISH_ATTESTATION_FAILED: " + " ".join(str(exc).splitlines()))
+            return 1
     # Protected installed entry point never falls back to cooperative repository code.
     installed = Path(__file__).resolve().parent == Path("/opt/agent-gates/bin")
     if installed or (len(sys.argv) > 1 and sys.argv[1] in ("enforce", "doctor")):
@@ -491,7 +513,7 @@ def main():
         # Validate before importing project-controlled Python into a root process.
         if sys.argv[1:3] == ["enforce", "init"]:
             paths = [source / name for name in
-                     ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py")]
+                     ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py", "github_verify.py")]
             paths += [source, *source.parents]
             trusted = (source.name == "bin" and ".agent-gates" not in source.parts
                        and ".agent-gates" not in Path(__file__).absolute().parts
