@@ -11,10 +11,18 @@ items marked **(verified)** were reproduced, items marked **(already covered)** 
 4 of 5 reviews: stay a verification backend (pre-merge gate for SwarmGit, agent-worktree, Cursor, plain terminals).
 1 of 5 proposed a TUI / IDE front end. Deferred until enforcement and GitHub integration exist.
 
-## Honest status today (v0.3.0)
+## Honest status today (v0.5.0)
 
 | Guarantee | Status |
 |---|---|
+| Merge-result testing, baseline, fail-closed TEST_CMD, stale-ref DENY, replay DENY, policy-change DENY | machine-enforced |
+| Agents cannot move `main`, edit gate code, policy or receipts | machine-enforced in **enforced mode (Linux)**; policy only in cooperative mode |
+| Verifier ≠ author | OS identity (`sudo`) in enforced mode; self-declared (`--as`) in cooperative mode |
+| Owner acceptance | signature mandatory in enforced mode; optional in cooperative mode |
+| What reached GitHub `main` was approved by the Owner | machine-checked: publish attestation signed on the Owner's machine, `agent-gates/verify` required |
+| Pull requests carry valid receipts | **advisory** (spec v0.5 Amendment 2) |
+
+---|---|
 | Merge-result testing, baseline, fail-closed TEST_CMD, stale-ref DENY, replay DENY | machine-enforced |
 | Verifier ≠ author | **self-declared** (`--as`), not proven |
 | Owner acceptance | unsigned by default |
@@ -24,7 +32,7 @@ Everything below exists to move rows 2–4 into the first row.
 
 ---
 
-## v0.3.1 — Hardening (≈1 day)
+## v0.3.1 — Hardening — shipped ([release](https://github.com/HlinorAI/hlinor-agent-gates/releases/tag/v0.3.1))
 
 | # | Item | Reviews | Note |
 |---|---|---|---|
@@ -36,7 +44,9 @@ Everything below exists to move rows 2–4 into the first row.
 | 6 | Debt from v0.3.0 review: `base...head`, `setup-global` without `--root` warning, `actions/checkout@v5` | — | |
 | 7 | Docs: 5-minute quickstart, `THREAT_MODEL.md` (cite HarnessSecurity-Bench, arXiv:2610.07639: auto-approve raised attack success 29.2% → 95.6%), "Supported: Linux, macOS. Not supported: Windows" | 4/5 | |
 
-## v0.4 — Enforced local mode (≈1 week)
+## v0.4 — Enforced local mode — shipped ([release](https://github.com/HlinorAI/hlinor-agent-gates/releases/tag/v0.4.0))
+
+Design change at spec time: per-agent keys replaced by OS identity via `sudo` plus gate-signed receipts (see `docs/spec/v0.4-enforced.md`).
 
 Why identity and enforcement ship together: per-agent signing keys are meaningless while all agents run as the same
 OS user — any agent can read any other agent's key. Identity becomes real only with separate users.
@@ -56,7 +66,9 @@ OS user — any agent can read any other agent's key. Identity becomes real only
 replacing the gate CLI or policy, removing hooks. One test per path; the effect (main unchanged) is asserted, not the error text.
 Rationale: HarnessSecurity-Bench (arXiv:2610.07639) found permitted tools leave alternative paths to forbidden operations.
 
-## v0.5 — GitHub integration (≈1 week)
+## v0.5 — GitHub integration — shipped ([release](https://github.com/HlinorAI/hlinor-agent-gates/releases/tag/v0.5.0))
+
+Root of trust is a publish attestation signed on the Owner's machine; PR checks are advisory (see `docs/spec/v0.5-github.md`).
 
 | # | Item | Reviews |
 |---|---|---|
@@ -64,7 +76,7 @@ Rationale: HarnessSecurity-Bench (arXiv:2610.07639) found permitted tools leave 
 | 2 | `agent-gates github protect`: branch protection, no direct push to main, required check | 4/5 |
 | 3 | Receipts published as PR check summary + artifact (audit trail outside `.git`) | 2/5 |
 
-## v0.6 — Observability and integrations
+## v0.6 — Observability and lifecycle — in progress (`docs/spec/v0.6-observability.md`)
 
 | # | Item | Reviews |
 |---|---|---|
@@ -72,7 +84,7 @@ Rationale: HarnessSecurity-Bench (arXiv:2610.07639) found permitted tools leave 
 | 2 | Notifications (Telegram / Slack) on verify done / acceptance expiring | 3/5 |
 | 3 | Lifecycle: `list-agents`, `remove-agent`, `cleanup`, `export-audit` | 1/5 |
 | 4 | Hash-chained audit log | 1/5 |
-| 5 | Drop-in pre-merge hook for orchestrators; MCP server exposing verify/accept | 2/5 |
+| 5 | Drop-in pre-merge hook for orchestrators (`check-merge`); MCP server → v0.7 | 2/5 |
 
 ## Rule for every new gate
 
@@ -103,5 +115,5 @@ A gate that never fires is not proven to work: each gate needs a sabotage test s
 1. Publish this roadmap + 5–7 labelled issues (now).
 2. asciinema demo of the full cycle, including three DENYs.
 3. Public reference repo with real receipts.
-4. Show HN **after v0.4** — when "gates" means agents technically cannot bypass them.
+4. Show HN **after v0.4** — when "gates" means agents technically cannot bypass them. (v0.4 shipped; ready once a live enforced install exists.)
 5. Homebrew tap after v0.5.
