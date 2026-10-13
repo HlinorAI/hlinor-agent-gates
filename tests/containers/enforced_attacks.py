@@ -207,10 +207,25 @@ def env_bypass():
 attempt('08 sudo environment injection',env_bypass)
 
 
+def audit_only_deny(before, old_log, code):
+    # v0.6 intentionally appends a gate-owned DENY, but changes no other protected file.
+    path = RECEIPTS / 'audit.jsonl'
+    current = path.read_bytes()
+    assert current.startswith(old_log)
+    extra = current[len(old_log):].splitlines()
+    assert len(extra) == 1
+    row = json.loads(extra[0])
+    assert row['event'] == 'deny' and row['result'] == code and row['actor'] == 'agent-codex'
+    after = protected()
+    assert {k:v for k,v in after.items() if k != str(path)} == {k:v for k,v in before.items() if k != str(path)}
+
+
 def self_verify():
     before=protected()
+    old_log=(RECEIPTS/'audit.jsonl').read_bytes()
     result=gate('codex','verify','project','agent/codex',ok=False)
-    assert result.returncode!=0 and protected()==before
+    assert result.returncode!=0
+    audit_only_deny(before, old_log, 'SELF_VERIFICATION')
 attempt('09 self verification has no receipt',self_verify)
 
 
@@ -242,8 +257,9 @@ def unsigned_merge():
         'owner':'root','created_at':'2026-10-09T00:00:00Z','expires_at':'2999-01-01T00:00:00Z',
         'signature':None,'allow_policy_change':False}
     value=fixture(record); before=protected()
+    old_log=(RECEIPTS/'audit.jsonl').read_bytes()
     assert gate('codex','merge','project',value,ok=False).returncode!=0
-    assert protected()==before
+    audit_only_deny(before, old_log, 'BAD_SIGNATURE')
 attempt('11 unsigned acceptance cannot merge',unsigned_merge)
 
 
