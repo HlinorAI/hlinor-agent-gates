@@ -234,15 +234,46 @@ def first_reads(f):
     assert not state.exists()
 
 
-case('initial read-only commands never initialize state',first_reads)
-case('1 branch status precedence and list agents',states)
-case('3 event order, receipt anchors, merged/used states and read-only paths',flow)
-case('4a inner edit/delete/reorder breaks chain and blocks mutations',inner)
-case('4b receipt tail, external anchors and exact-slot recovery',tail)
-case('5 verify append failure and recovery',lambda f:fault(f))
-case('5 merge append failure and recovery',lambda f:fault(f,True))
-case('6 reseal preserves evidence, invalidates by IDs and resumes chain',reseal)
-case('recovery collision fails closed without moving main',collision)
-case('11 five matching check-merge/merge DENYs with unchanged receipts',checks)
-print('%s passed, %s failed' % (passed,failed))
-sys.exit(bool(failed))
+def unreadable_reseal(f):
+    f.branch(); v=f.verify()
+    receipt=f.receipts/('verification-'+v+'.json')
+    receipt.write_text('{broken JSON')
+    before=receipt.read_bytes(); main=f.git('rev-parse','main')
+    f.call('audit','reseal','--reason','unreadable evidence')
+    row=f.rows()[-1]
+    assert v in row['invalidated_receipts']
+    assert row['unreadable_receipts']==[dict(id=v,file=receipt.name,reason='unreadable')]
+    assert receipt.read_bytes()==before and f.git('rev-parse','main')==main
+    assert f.call('audit','verify').startswith('OK ')
+    # Evidence is never recovered, and new valid receipts can follow reseal.
+    f.verify(); assert f.call('audit','verify').startswith('OK ')
+
+
+def actual_actor(f):
+    previous=os.environ.get('USER')
+    os.environ['USER']='forged-owner'
+    try:
+        f.branch(); v=f.verify(); a=f.accept(v); m=f.call('merge',a)
+        assert f.read('merge',m)['merged_by']==pwd.getpwuid(os.getuid()).pw_name
+        f.deny('RECEIPT_TAMPERED','merge','bad')
+        assert f.rows()[-1]['actor']==pwd.getpwuid(os.getuid()).pw_name
+    finally:
+        if previous is None: os.environ.pop('USER',None)
+        else: os.environ['USER']=previous
+
+
+if __name__=='__main__':
+    case('initial read-only commands never initialize state',first_reads)
+    case('1 branch status precedence and list agents',states)
+    case('3 event order, receipt anchors, merged/used states and read-only paths',flow)
+    case('4a inner edit/delete/reorder breaks chain and blocks mutations',inner)
+    case('4b receipt tail, external anchors and exact-slot recovery',tail)
+    case('5 verify append failure and recovery',lambda f:fault(f))
+    case('5 merge append failure and recovery',lambda f:fault(f,True))
+    case('6 reseal preserves evidence, invalidates by IDs and resumes chain',reseal)
+    case('recovery collision fails closed without moving main',collision)
+    case('11 five matching check-merge/merge DENYs with unchanged receipts',checks)
+    case('review malformed receipt reseal preserves unreadable evidence',unreadable_reseal)
+    case('review cooperative actor ignores forged USER',actual_actor)
+    print('%s passed, %s failed' % (passed,failed))
+    sys.exit(bool(failed))

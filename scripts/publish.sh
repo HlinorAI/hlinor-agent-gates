@@ -2,13 +2,14 @@
 # Owner-only publication. Never invoked by agents or by the test suites against GitHub.
 set -euo pipefail
 KIT="$(cd "$(dirname "$0")/.." && pwd -P)"
-SOURCE=""; KEY=""; REPO=HlinorAI/hlinor-agent-gates
+SOURCE=""; KEY=""; AUDIT_EXPORT=""; REPO=HlinorAI/hlinor-agent-gates
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --audit-export) AUDIT_EXPORT="$2"; shift 2;;
     --source) SOURCE="$2"; shift 2;;
     --key) KEY="$2"; shift 2;;
     --repository) REPO="$2"; shift 2;;
-    *) echo 'Usage: scripts/publish.sh --source <server-repository> --key <Mac-key> [--repository owner/repo]' >&2; exit 2;;
+    *) echo 'Usage: scripts/publish.sh --source <server-repository> --key <Mac-key> [--repository owner/repo] [--audit-export file.tar.gz]' >&2; exit 2;;
   esac
 done
 [ -n "$SOURCE" ] && [ -n "$KEY" ] || { echo 'DENY PUBLISH_INPUT_MISSING: source and Owner Mac key required'; exit 1; }
@@ -54,7 +55,8 @@ git log --first-parent --reverse --format='%h %s' "$OLD..$NEW"
 printf 'Sign and publish this exact range? Type y: '
 read -r ANSWER
 [ "$ANSWER" = y ] || { echo 'DENY PUBLISH_NOT_CONFIRMED: publication cancelled'; exit 1; }
-"$KIT/bin/agent-gates" publish attest "$OLD" "$NEW" --key "$KEY" --repository "$REPO"
+if [ -n "$AUDIT_EXPORT" ]; then set -- --audit-export "$AUDIT_EXPORT"; else set --; fi
+"$KIT/bin/agent-gates" publish attest "$OLD" "$NEW" --key "$KEY" --repository "$REPO" "$@"
 [ "$(git rev-parse refs/heads/main)" = "$NEW" ] || { echo 'DENY MAIN_MOVED: main changed while confirming'; exit 1; }
 REFS=("$NEW:refs/heads/main" refs/notes/agent-gates-publish)
 if git show-ref --verify --quiet refs/notes/agent-gates; then

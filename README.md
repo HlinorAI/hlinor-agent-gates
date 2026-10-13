@@ -44,6 +44,79 @@ read -r -p 'Accepted receipt ID: ' ACCEPTANCE_ID
 "$REPO/.agent-gates/agent-gates" status agent/codex
 ```
 
+## Observability and lifecycle (v0.6)
+
+Run the trusted main CLI; enforced forms below take the project name immediately
+following the command (for example `status my-project --all`).
+
+```bash
+GATE=/path/to/main/.agent-gates/agent-gates
+"$GATE" status --all --json
+"$GATE" history --since 7d
+"$GATE" list-agents
+"$GATE" check-merge ACCEPTANCE_ID
+"$GATE" audit verify --expect-head PREVIOUSLY_SAVED_HASH
+"$GATE" export-audit /outside/receipts/audit.tar.gz
+"$GATE" cleanup --dry-run
+"$GATE" cleanup
+"$GATE" remove-agent codex --yes
+```
+
+Read commands do not repair evidence. `check-merge` appends one audit event but
+changes no refs or receipts. A broken chain blocks verification, acceptance and
+merge. Owner `audit reseal --reason 'reviewed explanation'` preserves the discarded
+bytes and invalidates receipts from that tail, including unreadable JSON evidence.
+They remain on disk and cannot be accepted or merged. Receipts anchor their own
+sequence and predecessor; save the audit head externally to detect truncation of
+receipt-less events. Exports snapshot the audit, receipts and logs under the gate
+lock and include a SHA256 manifest and chain head.
+
+Removal always refuses dirty worktrees, including with `--yes`. Unmerged commits
+are printed and their branches and receipts remain. Enforced root uses
+`enforce remove-agent PROJECT NAME --yes`: the user is locked, its home archived,
+and group membership and registration removed. A user registered in another
+project is refused with `AGENT_IN_USE` to preserve that project's home. Cleanup
+removes only registered, unheld test resources; foreign files, locks, worktrees,
+install-pending markers and evidence stay. Enforced runner exports are registered
+by token under the project's `tmp/`; their actual contents in `/tmp` are removed
+by the runner UID, never root.
+
+Configure optional hooks in main's policy (ordinary policy override rules apply):
+
+```bash
+NOTIFY_CMD="/path/to/trusted-notifier"
+NOTIFY_EVENTS="verify,merge,deny,expiring"
+```
+
+The hook reads one JSON audit event plus one-line `text` on stdin. It gets 10
+seconds; failures are audited and never reverse the gate result or trigger loops.
+`status --all --notify` retries failed expiry notifications and deduplicates
+successful ones per acceptance. The Owner can schedule the following command,
+for example with cron; use root's crontab for enforced mode:
+
+```cron
+*/10 * * * * /opt/agent-gates/bin/agent-gates status my-project --all --notify
+```
+
+The kit ships `examples/notify/telegram.sh` and `slack.sh` as optional hooks. In
+cooperative mode agents share the caller UID and can read notifier secrets.
+Enforced mode runs hooks as `ag-notify`, separate from tests and the gate. Put
+credentials in `/etc/agent-gates/notify.env` as quoted `NAME=value` assignments
+(root:ag-notify, mode 0640); never store them in the repository. Hooks are trusted
+Owner code and deliberately have network access. Upgrade an existing enforced
+install using the protected root-owned kit's `enforce upgrade PROJECT`.
+
+For Mac publication, the Owner first creates `export-audit` on the server, copies
+that file to the Mac, and passes `--audit-export /local/audit.tar.gz` to
+`scripts/publish.sh` or `agent-gates publish attest`. The signed attestation includes
+`audit_head` (`seq`, `hash`) and the complete exported audit chain. Action checks
+canonical hashes, head and receipt sequence/predecessor bindings and ordering.
+A same-checkout attestation may use its local audit automatically. Immutable
+v0.5 receipts without audit fields retain their old signature checks.
+The export contains audit history and receipt evidence: review it before making
+it public in attestation notes. Publication uses an Owner-held key; agents do not
+publish or acquire that key.
+
 ## What it sets up
 
 | | What | Enforced by |
@@ -228,6 +301,9 @@ Be precise about this, because the name says "gates".
 | Only Git Agent can move main | | ⚠️ separate OS users/clones are not part of v0.2 |
 | No push | | ⚠️ `GIT_POLICY.md` |
 | GitHub attestation and receipt validation | ✅ trusted checker pins settings keys and exact evidence | detection requires the workflow to remain enabled and unchanged |
+| Audit integrity | ✅ hash chain, receipt anchors; agents cannot write enforced audit | cooperative tail truncation needs a saved external head |
+| Expiry notifications | ✅ successful-hook dedupe; enforced separate notifier UID | hook success does not prove delivery; cooperative secrets are agent-readable |
+| Agent removal and cleanup | ✅ dirty-worktree refusal, kept evidence, registered resources and locks | Owner decides what unmerged work to archive |
 | GitHub PR receipt gate | | ⚠️ advisory in v0.5; a PR can replace its workflow while preserving the required-check name |
 
 In cooperative mode, an agent running as the same OS user as you **can** ignore the policy rows, and can remove a lock flag it is able to set. Worktrees share one `.git`, so any agent that can commit can also move `main`. Real enforcement needs agents in separate clones under separate OS users, with merges allowed only against a signed approval receipt bound to the reviewed commit SHA. Linux enforced mode below makes separate OS users and signed approvals the only gate path; cooperative mode supplies CLI checks.
@@ -380,12 +456,13 @@ Publish from the Owner's clean main checkout on the Mac, with an existing origin
 
 ```bash
 ./scripts/publish.sh --source owner@dev-host:/path/to/server-repository \
-  --key /private/path/publish --repository HlinorAI/hlinor-agent-gates
+  --key /private/path/publish --repository HlinorAI/hlinor-agent-gates \
+  --audit-export /private/path/server-audit.tar.gz
 ```
 
 The script fast-forwards from the explicit server source, fetches receipt notes,
 reads GitHub's current main, displays the first-parent commit list and asks `y`.
-It calls `agent-gates publish attest <old> <new> --key <path>` and atomically pushes
+It calls `agent-gates publish attest <old> <new> --key <path> --audit-export <file>` and atomically pushes
 the exact main SHA, `refs/notes/agent-gates` and `refs/notes/agent-gates-publish`.
 A lease refuses a concurrent change to the reviewed GitHub base. Signing alone is
 local: `publish attest` never pushes or calls GitHub API.

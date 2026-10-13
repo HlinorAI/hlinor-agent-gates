@@ -1,4 +1,4 @@
-# Threat model — v0.3.1
+# Threat model — v0.6.0
 
 Supported: Linux, macOS. Not supported: Windows.
 
@@ -39,8 +39,8 @@ The CLI checks receipts but does not authenticate a designated Git Agent.
 
 - A same-user actor can run Git directly, move main, bypass the CLI, edit hooks,
   config or code, alter unsigned receipts, or remove the global template setting.
-- Separate OS users/clones, mandatory signed acceptance and a protected merge
-  service are outside this release. A signature alone does not protect main's CLI.
+- In cooperative mode a signature alone does not protect main's CLI. Enforced
+  mode supplies separate OS users/clones and protected merge code on Linux.
 - Tests have no filesystem/network/secret sandbox. A timeout limits the process
   group, not network access or irreversible side effects that ran before timeout.
 - Warnings do not ensure complete test coverage, honest summaries or human review.
@@ -62,3 +62,36 @@ tools and commands could provide alternative routes to operations that the
 configured restrictions were intended to prevent.
 
 Implication for agent-gates: same-user mode is advisory; enforcement requires separate OS users (v0.4).
+
+## Audit and notification boundaries (v0.6)
+
+Audit JSONL is hash-chained. Inner corruption is detected; receipt anchors detect
+loss of their own event. Truncating receipt-less events requires an external
+head/sequence, a previously saved export manifest or signed publish attestation.
+A cooperative same-user actor can rewrite the complete chain and unsigned
+receipts; without an external anchor this remains advisory. Enforced agents
+cannot write the audit, receipts, policy or signing key. Reseal is a visible Owner
+operation, retains discarded evidence and invalidates its receipt IDs.
+
+Notifier hooks are trusted Owner code. Cooperative hooks share agent-readable
+secrets. Enforced hooks run as a distinct `ag-notify` UID, cannot read gate keys,
+receipts, private runner exports or agent homes, and load secrets only from a
+root-owned group-readable file. A machine-wide gate-side notifier lock serializes
+complete-UID cleanup. Timeout, nonzero exit and missing notifier results produce
+`notify_failed`, never change the gate outcome, and never notify recursively.
+The hook has network access; this is not a network sandbox or a guarantee of
+message delivery. Notification success means the hook exited successfully.
+
+Lifecycle runs under the project gate lock. Dirty worktrees are never removed;
+branches and evidence are retained. Enforced removal archives rather than
+traversing/deleting agent-controlled homes; root status is run as the agent to
+avoid executing local clean filters as root. Shared multi-project users require
+Owner resolution before archiving. Cleanup trusts only registered gate resources,
+respects resource/machine locks and runs runner-file removal as the runner UID.
+
+Publish attestation signs an export's `seq`/`hash` and full audit chain. The Action
+checks receipt seq/prev anchors and ordering alongside the existing receipt ID,
+signature and ref bindings. It does not prove an export is newer than another
+external checkpoint, or identify omitted receipt-less events without that
+checkpoint. Publish/acceptance keys remain separate. Old pre-audit receipts are
+validated using the v0.5 rules. PR checks remain advisory as documented in v0.5.

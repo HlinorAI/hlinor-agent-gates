@@ -173,8 +173,65 @@ class Gates(obs.Observability):
         return self.git(*args)
 
     def audit_paths(self):
-        return {"agent/"+name.removeprefix("agent-"): str(Path("/home")/name/"work"/self.project)
+        return {"agent/"+name.removeprefix("agent-"): str(Path(pwd.getpwnam(name).pw_dir)/"work"/self.project)
                 for name in self.info["users"]}
+
+    def notify_config(self):
+        return self.policy(self.head('main'))
+
+    def notify_run(self, command, message):
+        invocation=['/usr/bin/sudo','-n','-u','ag-notify',str(API.CODE/'bin/ag-notify')]
+        # Serialize gate-side: an entire-UID kill must not kill another waiting notifier.
+        with (API.STATE/'notify.lock').open('r+') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            try:
+                result=subprocess.run(invocation,input=json.dumps(dict(command=command,message=message)).encode(),
+                                      capture_output=True,env=environment(),timeout=15)
+                try:return json.loads(result.stdout).get('ok') is True
+                except (ValueError,AttributeError):return False
+            finally:
+                # Same no-argument sudo permission, cleanup performed by ag-notify itself.
+                subprocess.run(invocation,input=b'{"cleanup":true}',capture_output=True,
+                               env=environment(),timeout=5)
+
+    def agent_dirty(self, name, path):
+        # A root status may execute project-controlled clean filters. Run it as the agent.
+        return API.run('/usr/bin/git','-c','core.fsmonitor=false','-c','core.hooksPath=/dev/null',
+                       '-C',str(path),'status','--porcelain',uid='agent-'+name,env=environment())
+
+    def remove_registered_agent(self, name, path):
+        account=pwd.getpwnam('agent-'+name)
+        # A home may host more than one registered project. Do not archive another project.
+        for manifest in (API.CODE/'projects').glob('*.json'):
+            if manifest.stem!=self.project and account.pw_name in json.loads(manifest.read_bytes())['users']:
+                deny('AGENT_IN_USE','agent remains registered in another project')
+        API.run('usermod','--lock','--shell','/usr/sbin/nologin',account.pw_name)
+        API.group(account.pw_name)
+        groups=[API.grp.getgrgid(gid).gr_name for gid in os.getgrouplist(account.pw_name,account.pw_gid)
+                if gid!=API.grp.getgrnam('agents').gr_gid and gid!=API.grp.getgrnam(account.pw_name).gr_gid]
+        API.run('usermod','--gid',account.pw_name,'--groups',','.join(groups),account.pw_name)
+        archive=API.STATE/'archive';API.secure_dir(archive,0,0,0o700)
+        while True:
+            target=archive/(name+'-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
+            if not target.exists():break
+        os.rename(account.pw_dir,target)
+        API.run('usermod','--home',str(target),account.pw_name)
+        self.info['users'].remove(account.pw_name)
+        manifest=API.CODE/'projects'/(self.project+'.json')
+        temporary=manifest.with_suffix('.new');temporary.write_text(json.dumps(self.info,sort_keys=True))
+        os.chown(temporary,0,0);temporary.chmod(0o644);os.replace(temporary,manifest)
+        print('ARCHIVED '+str(target))
+
+    def remove_temp(self, record):
+        if record['kind']!='runner':deny('INVALID_ARGUMENT','unknown temporary resource')
+        result=self.runner('remove',record['token'])
+        if result.returncode:deny('RUNNER_CLEANUP_FAILED','cannot remove registered runner export')
+
+    def cleanup(self, args):
+        self.audit_owner()
+        with (API.STATE/'runner.lock').open('r+') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            super().cleanup(args)
 
     def git_result(self, *args, data=None):
         command = ["/usr/bin/git", "-c", "safe.directory=" + str(self.repo),
@@ -398,8 +455,10 @@ class Gates(obs.Observability):
         return paths
 
     def runner(self, *args, **kwargs):
-        return subprocess.run(["/usr/bin/sudo", "-n", "-u", "ag-runner", str(API.CODE / "bin/ag-run"), *args],
-                              env=environment(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+        invocation=["/usr/bin/sudo", "-n", "-u", "ag-runner", str(API.CODE / "bin/ag-run"), *args]
+        if os.geteuid()==0:
+            invocation=["/usr/sbin/runuser","-u","agent-gates","--",*invocation]
+        return subprocess.run(invocation,env=environment(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,**kwargs)
 
     def cleanup_runner(self, token):
         result = self.runner("kill")
@@ -431,6 +490,7 @@ class Gates(obs.Observability):
 
     def test(self, commit):
         token = os.urandom(16).hex()
+        marker=self.register_temp(token,'runner')
         started, timed_out = time.monotonic(), False
         # Gate controls the timeout/result/log. No result metadata comes from test code.
         with tempfile.TemporaryFile() as archive, tempfile.TemporaryFile() as log:
@@ -450,6 +510,7 @@ class Gates(obs.Observability):
                     timed_out = True
                 finally:
                     self.cleanup_runner(token)
+                    marker.unlink(missing_ok=True)
                     if process.poll() is None:
                         try:
                             os.killpg(process.pid, signal.SIGKILL)
@@ -673,11 +734,11 @@ def main(argv, api):
         project, actor = args.project, "root" if os.geteuid() == 0 else API.caller()
     if getattr(args, "branch", None) and not re.fullmatch(r"agent/[a-z0-9-]+", args.branch):
         deny("INVALID_ARGUMENT", "branch must match agent/<name>")
-    if args.command == "audit" and os.geteuid() != 0:
-        deny("ROOT_REQUIRED", "audit requires Owner root")
+    if args.command in ("audit","export-audit","remove-agent","cleanup") and os.geteuid() != 0:
+        deny("ROOT_REQUIRED", "command requires Owner root")
     gates = Gates(project, actor)
     os.umask(0o027)
-    read_only = args.command in ("history", "list-agents") or (
+    read_only = (args.command=="cleanup" and args.dry_run) or args.command in ("history", "list-agents") or (
         args.command == "status" and not args.notify) or (
         args.command == "audit" and args.audit_command == "verify")
     with gates.lock(read_only=read_only):
