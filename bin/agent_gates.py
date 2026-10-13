@@ -9,6 +9,10 @@ import importlib.util
 import stat
 import json
 import os
+import pwd
+import shutil
+import tarfile
+import io
 from pathlib import Path
 import re
 import shlex
@@ -17,9 +21,11 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
-VERSION = "0.5.0"
+sys.dont_write_bytecode = True
+VERSION = "0.6.0"
 
 
 class Deny(Exception):
@@ -120,21 +126,609 @@ def config():
     return values
 
 
-class Gates:
+"""Shared stdlib audit chain and read paths. Callers hold the project gate lock."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+from datetime import datetime, timedelta, timezone
+
+ZERO = '0' * 64
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+
+
+def digest(value):
+    return hashlib.sha256(value).hexdigest()
+
+
+def stamp():
+    return datetime.now(timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z')
+
+
+def clock(value):
+    result = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if result.tzinfo is None:
+        raise ValueError('timezone required')
+    return result
+
+
+class Broken(Exception):
+    def __init__(self, seq, text):
+        self.seq = seq
+        super().__init__('seq %s: %s' % (seq, text))
+
+
+class Audit:
+    def __init__(self, gates):
+        self.gates = gates
+        self.path = gates.directory / 'audit.jsonl'
+
+    def scan(self):
+        rows, head = [], ZERO
+        raw = self.path.read_bytes() if self.path.exists() else b''
+        for index, line in enumerate(raw.splitlines(keepends=True), 1):
+            try:
+                row = json.loads(line)
+                unsigned = {k: v for k, v in row.items() if k != 'hash'}
+                if (type(row.get('seq')) is not int or row['seq'] != index or row.get('prev') != head
+                        or row.get('hash') != digest(canonical(unsigned)) or canonical(row) + b'\n' != line
+                        or any(k not in row for k in ('at', 'event', 'actor', 'project', 'branch', 'receipt', 'result'))):
+                    raise ValueError('invalid canonical line, sequence, predecessor or hash')
+                clock(row['at'])
+            except (ValueError, TypeError, AttributeError):
+                raise Broken(index, 'invalid canonical line, sequence, predecessor or hash')
+            rows.append(row)
+            head = row['hash']
+        return rows, head
+
+    def prepare(self, record):
+        rows, head = self.scan()
+        record['audit_seq'], record['audit_prev'] = len(rows) + 1, head
+        return record
+
+    def append(self, event, *, branch='', receipt='', result='OK', actor=None, **extra):
+        try:
+            rows, head = self.scan()
+            row = dict(seq=len(rows)+1, at=stamp(), event=event,
+                       actor=actor or self.gates.audit_actor(), project=self.gates.audit_project(),
+                       branch=branch, receipt=receipt, result=result, prev=head, **extra)
+            row['hash'] = digest(canonical(row))
+            with self.path.open('ab') as stream:
+                os.chmod(self.path, 0o600)
+                self.gates.audit_ownership(self.path)
+                stream.write(canonical(row) + b'\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            fd = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            if event not in ('notified', 'notify_failed'):
+                self.gates.notify(row)
+            return row
+        except Broken as exc:
+            self.gates.audit_deny('AUDIT_BROKEN', str(exc))
+        except OSError:
+            self.gates.audit_deny('AUDIT_UNAVAILABLE', 'audit append could not be made durable')
+
+    def receipt_event(self, record, recovered=False):
+        event = {'verification': 'verify', 'acceptance': 'accept', 'merge': 'merge'}[record['kind']]
+        fields = self.gates.audit_fields(record)
+        fields['receipt'] = record['id']
+        fields['result'] = record.get('verdict', 'OK')
+        if recovered:
+            rows, head = self.scan()
+            if record['audit_seq'] != len(rows)+1 or record['audit_prev'] != head:
+                self.gates.audit_deny('AUDIT_BROKEN', 'seq %s: recovery slot occupied or predecessor differs' % record['audit_seq'])
+            fields.update(original_event=event, original_created_at=record['created_at'],
+                          original_audit_seq=record['audit_seq'], original_audit_prev=record['audit_prev'])
+        return self.append('recovered' if recovered else event, **fields)
+
+    def records(self, strict=True):
+        invalidated = self.invalidated() if strict else set()
+        for kind in ('verification', 'acceptance', 'merge'):
+            for path in sorted(self.gates.directory.glob(kind+'-*.json')):
+                if path.stem.removeprefix(kind+'-') in invalidated:
+                    continue
+                # Delegate hash/signature validation to the existing gate.
+                try:
+                    yield self.gates.load(kind, path.stem.removeprefix(kind+'-'))[0]
+                except self.gates.audit_refusal():
+                    if strict:
+                        raise
+
+    @staticmethod
+    def matched(record, rows):
+        for row in rows:
+            if row['receipt'] != record['id']:
+                continue
+            if row['event'] == 'recovered':
+                if (row['seq'] == record['audit_seq'] and row['prev'] == record['audit_prev']
+                        and row.get('original_audit_seq') == record['audit_seq']
+                        and row.get('original_audit_prev') == record['audit_prev']):
+                    return True
+            elif row['event'] == {'verification':'verify', 'acceptance':'accept', 'merge':'merge'}[record['kind']]:
+                if row['seq'] == record['audit_seq'] and row['prev'] == record['audit_prev']:
+                    return True
+        return False
+
+    def invalidated(self, rows=None):
+        if rows is None:
+            rows, _ = self.scan()
+        return {identifier for row in rows if row['event']=='reseal'
+                for identifier in row.get('invalidated_receipts', [])}
+
+    def require_valid(self, record):
+        if record['id'] in self.invalidated():
+            self.gates.audit_deny('RECEIPT_INVALIDATED', 'receipt was invalidated by Owner reseal')
+
+    def verify(self, expect_head=None, expect_seq=None):
+        rows, head = self.scan()
+        if expect_head is not None and head != expect_head:
+            raise Broken(len(rows)+1, 'external head mismatch')
+        if expect_seq is not None and len(rows) != expect_seq:
+            raise Broken(min(len(rows), expect_seq)+1, 'external sequence mismatch')
+        invalidated = self.invalidated(rows)
+        for record in self.records():
+            if record['id'] in invalidated:
+                continue
+            if 'audit_seq' not in record:  # v0.5 evidence stays immutable and readable
+                continue
+            if type(record['audit_seq']) is not int or record['audit_seq'] < 1:
+                raise Broken(1, 'invalid receipt audit sequence')
+            if not self.matched(record, rows):
+                raise Broken(record['audit_seq'], 'receipt %s has no matching event' % record['id'])
+        return rows, head
+
+    def recover(self):
+        try:
+            rows, _ = self.scan()
+        except Broken as exc:
+            self.gates.audit_deny('AUDIT_BROKEN', str(exc))
+        except OSError:
+            self.gates.audit_deny('AUDIT_UNAVAILABLE', 'audit log unavailable')
+        invalidated = self.invalidated(rows)
+        pending = []
+        for kind in ('verification', 'acceptance', 'merge'):
+            for path in sorted(self.gates.directory.glob(kind+'-*.json')):
+                try:
+                    record = self.gates.load(kind, path.stem.removeprefix(kind+'-'))[0]
+                except self.gates.audit_refusal():
+                    # Preserve the existing signature/tamper DENY from the requested operation.
+                    continue
+                if record['id'] not in invalidated and 'audit_seq' in record and not self.matched(record, rows):
+                    if (type(record['audit_seq']) is not int or record['audit_seq'] < 1
+                            or not isinstance(record.get('audit_prev'), str)
+                            or not re.fullmatch(r'[a-f0-9]{64}',record['audit_prev'])):
+                        self.gates.audit_deny('AUDIT_BROKEN', 'invalid receipt audit anchor')
+                    pending.append(record)
+        for record in sorted(pending, key=lambda r: (r['audit_seq'], r['created_at'], r['id'])):
+            self.receipt_event(record, recovered=True)
+
+    def reseal(self, reason):
+        if not reason.strip():
+            self.gates.audit_deny('INVALID_ARGUMENT', 'reseal requires a reason')
+        raw = self.path.read_bytes() if self.path.exists() else b''
+        try:
+            rows, _ = self.scan()
+            prefix = raw
+        except Broken as exc:
+            prefix = b''.join(raw.splitlines(keepends=True)[:exc.seq-1])
+        valid_rows = [json.loads(line) for line in prefix.splitlines()]
+        prior_invalidated = self.invalidated(valid_rows)
+        invalidated = set()
+        unreadable = []
+        for kind in ('verification', 'acceptance', 'merge', 'pending'):
+            for path in self.gates.directory.glob(kind+'-*.json'):
+                try:
+                    record = json.loads(path.read_bytes())
+                    if not isinstance(record, dict):
+                        raise ValueError('receipt is not an object')
+                except (ValueError, UnicodeError):
+                    identifier = path.stem.removeprefix(kind+'-')
+                    invalidated.add(identifier)
+                    unreadable.append(dict(id=identifier, file=path.name, reason='unreadable'))
+                    continue
+                if (record.get('id') not in prior_invalidated and 'audit_seq' in record
+                        and not self.matched(record, valid_rows)):
+                    invalidated.add(record['id'])
+        tail = raw[len(prefix):]
+        tail_hash = digest(tail)
+        # Keep every discarded byte, including a partially written line, as permanent evidence.
+        saved = self.gates.directory / ('audit-tail-'+tail_hash+'.log')
+        if tail and not saved.exists():
+            with saved.open('xb') as stream:
+                os.chmod(saved, 0o600)
+                self.gates.audit_ownership(saved)
+                stream.write(tail); stream.flush(); os.fsync(stream.fileno())
+        temporary = self.path.with_name('audit.reseal.tmp')
+        try:
+            with temporary.open('xb') as stream:
+                os.chmod(temporary, 0o600)
+                self.gates.audit_ownership(temporary)
+                stream.write(prefix); stream.flush(); os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+            self.append('reseal', reason=reason, discarded_tail_sha256=tail_hash,
+                        discarded_tail_file=saved.name if tail else '',
+                        invalidated_receipts=sorted(invalidated), unreadable_receipts=unreadable)
+        except OSError:
+            self.gates.audit_deny('AUDIT_UNAVAILABLE', 'reseal could not be made durable')
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+class Observability:
+    def audit_project(self):
+        return getattr(self, 'project', self.repo.name)
+
+    def audit_actor(self):
+        return getattr(self, 'actor', pwd.getpwuid(os.getuid()).pw_name)
+
+    def audit_ownership(self, path):
+        gate = getattr(self, 'gate', None)
+        if gate is not None and os.geteuid() == 0:
+            os.chown(path, gate.pw_uid, gate.pw_gid)
+
+    def audit_fields(self, record):
+        branch = record.get('branch', '')
+        if record['kind'] == 'acceptance':
+            branch = self.load('verification', record['verification_id'])[0]['branch']
+        elif record['kind'] == 'merge':
+            acceptance = self.load('acceptance', record['acceptance_id'])[0]
+            branch = self.load('verification', acceptance['verification_id'])[0]['branch']
+        actor = record.get('verifier', record.get('owner', record.get('merged_by', self.audit_actor())))
+        return dict(branch=branch, actor=actor)
+
+    def audit(self, args):
+        if args.audit_command == 'reseal':
+            self.audit_owner()
+            Audit(self).reseal(args.reason)
+            Audit(self).recover()
+        try:
+            rows, head = Audit(self).verify(getattr(args, 'expect_head', None), getattr(args, 'expect_seq', None))
+        except Broken as exc:
+            self.audit_deny('AUDIT_BROKEN', str(exc))
+        print('OK %s %s' % (len(rows), head))
+
+    def audit_report_break(self):
+        try:
+            Audit(self).verify()
+        except (Broken, OSError, self.audit_refusal()) as exc:
+            import sys
+            print('AUDIT_BROKEN: '+str(exc), file=sys.stderr)
+
+    def history(self, args):
+        self.audit_report_break()
+        try:
+            rows, _ = Audit(self).scan()
+        except Broken as exc:
+            # Show the valid prefix, without repairing or writing anything.
+            raw = Audit(self).path.read_bytes()
+            rows = [json.loads(line) for line in raw.splitlines()[:exc.seq-1]]
+        threshold = None
+        if args.since:
+            match = re.fullmatch(r'(\d+)([dhm])', args.since)
+            if not match:
+                self.audit_deny('INVALID_ARGUMENT', '--since must use d, h or m')
+            threshold = datetime.now(timezone.utc)-timedelta(seconds=int(match[1])*{'d':86400,'h':3600,'m':60}[match[2]])
+        rows = [r for r in rows if (not args.branch or r['branch'] == args.branch)
+                and (threshold is None or clock(r['at']) >= threshold)]
+        if args.json:
+            print(canonical(rows).decode())
+        else:
+            for r in rows:
+                print('%s %s %s %s %s %s' % tuple(r[k] for k in ('at','event','branch','actor','receipt','result')))
+
+    def summaries(self):
+        records = list(Audit(self).records(strict=False))
+        vs = [r for r in records if r['kind']=='verification']
+        accepts = [r for r in records if r['kind']=='acceptance']
+        used = {r['acceptance_id'] for r in records if r['kind']=='merge'}
+        used_vs = {r['verification_id'] for r in accepts if r['id'] in used}
+        invalidated = Audit(self).invalidated()
+        main = self.head(self.audit_main())
+        rows = []
+        for branch in self.audit_git('for-each-ref', '--format=%(refname:short)', 'refs/heads/agent/').splitlines():
+            candidates = [r for r in vs if r['branch']==branch]
+            v = max(candidates, key=lambda r:(r['created_at'],r['id']), default=None)
+            candidates = [r for r in accepts if v and r['verification_id']==v['id']]
+            a = max(candidates, key=lambda r:(r['created_at'],r['id']), default=None)
+            verification, acceptance = 'NONE', 'NONE'
+            if v:
+                if v['id'] in invalidated: verification = 'INVALIDATED'
+                elif v['id'] in used_vs: verification = 'MERGED'
+                elif self.head(branch)!=v['head_sha']: verification='STALE: BRANCH_MOVED'
+                elif main!=v['base_sha']: verification='STALE: MAIN_MOVED'
+                else: verification=v['verdict']
+            if a:
+                left=(clock(a['expires_at'])-datetime.now(timezone.utc)).total_seconds()
+                if a['id'] in invalidated or v['id'] in invalidated: acceptance='INVALIDATED'
+                elif a['id'] in used: acceptance='USED'
+                elif left<=0: acceptance='EXPIRED'
+                elif left<7200: acceptance='EXPIRING (<2h)'
+                else: acceptance='VALID (expires in %sh)' % max(1, int(left//3600))
+            ahead=int(self.audit_git('rev-list','--count', main+'..'+self.head(branch)))
+            if verification.startswith('STALE') or verification=='INVALIDATED': next_step='re-verify'
+            elif not ahead or verification=='MERGED': next_step='—'
+            elif verification in ('NONE','REJECT'): next_step='verify'
+            elif acceptance in ('NONE','EXPIRED'): next_step='accept'
+            else: next_step='merge'
+            rows.append(dict(branch=branch,author=branch.removeprefix('agent/'),ahead=ahead,
+                             verification=verification,acceptance=acceptance,next_step=next_step))
+        return rows
+
+    def notify_config(self):
+        return self.cfg if self.cfg is not None else self.policy(self.head('main'))
+
+    def notify_run(self, command, message):
+        with tempfile.TemporaryFile() as output:
+            process = subprocess.Popen(command, shell=True, stdin=subprocess.PIPE, stdout=output,
+                                       stderr=output, start_new_session=True, cwd=self.repo)
+            try:
+                process.communicate(canonical(message)+b'\n', timeout=10)
+                return process.returncode == 0
+            except subprocess.TimeoutExpired:
+                return False
+            finally:
+                try: os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError: pass
+                process.wait()
+
+    def notify(self, row):
+        # Audit persistence precedes the hook; notifier failures never alter the gate decision.
+        try:
+            cfg=self.notify_config()
+            if not cfg.get('NOTIFY_CMD') or row['event'] not in [event.strip() for event in cfg.get('NOTIFY_EVENTS','verify,merge,deny,expiring').split(',')]:
+                return
+            message=dict(row, text=' '.join(('%s %s %s %s' %
+                         (row['project'],row['event'],row['branch'],row['result'])).splitlines()))
+            try: ok=self.notify_run(cfg['NOTIFY_CMD'],message)
+            except (OSError,ValueError,subprocess.SubprocessError): ok=False
+            Audit(self).append('notified' if ok else 'notify_failed',branch=row['branch'],
+                               receipt=row['receipt'],result='OK' if ok else 'FAILED',
+                               notified_event=row['event'], source_seq=row['seq'])
+        except (OSError, Broken, self.audit_refusal()) as exc:
+            print('WARNING: notification audit unavailable: '+str(exc),file=sys.stderr)
+
+    def notify_expiring(self):
+        self.audit_owner()
+        audit=Audit(self); rows,_=audit.verify()
+        already={r['receipt'] for r in rows if r['event']=='notified' and r.get('notified_event')=='expiring'}
+        used={r['acceptance_id'] for r in audit.records(strict=False) if r['kind']=='merge'}
+        for record in audit.records(strict=False):
+            if record['kind']!='acceptance' or record['id'] in already|used|audit.invalidated(rows): continue
+            remaining=(clock(record['expires_at'])-datetime.now(timezone.utc)).total_seconds()
+            if 0 < remaining < 7200:
+                fields=self.audit_fields(record)
+                audit.append('expiring',receipt=record['id'],seconds_remaining=round(remaining),**fields)
+
+    def export_audit(self, args):
+        self.audit_owner()
+        rows,head=Audit(self).verify()
+        target=Path(args.destination).absolute()
+        if self.directory.resolve()==target.resolve() or self.directory.resolve() in target.resolve().parents:
+            self.audit_deny('INVALID_ARGUMENT','export destination must be outside receipts')
+        files={p.name:p.read_bytes() for p in self.directory.iterdir() if p.is_file() and not p.is_symlink()}
+        manifest=dict(files={name:digest(data) for name,data in sorted(files.items())},
+                      seq=len(rows),head=head,tool_version=VERSION)
+        files['MANIFEST.json']=canonical(manifest)
+        # Exclusive creation avoids overwriting evidence; source data is never modified.
+        try:
+            with target.open('xb') as output:
+                with tarfile.open(fileobj=output,mode='w:gz') as archive:
+                    for name,data in sorted(files.items()):
+                        entry=tarfile.TarInfo(name);entry.size=len(data);entry.mode=0o600
+                        archive.addfile(entry,io.BytesIO(data))
+                output.flush();os.fsync(output.fileno())
+        except FileExistsError:
+            self.audit_deny('INVALID_ARGUMENT','export destination already exists')
+        print('EXPORTED %s %s %s' % (target,len(rows),head))
+
+    def remove_agent(self, args):
+        self.audit_owner()
+        if not re.fullmatch('[a-z0-9-]+',args.name): self.audit_deny('INVALID_ARGUMENT','invalid agent name')
+        branch='agent/'+args.name; path=self.audit_paths().get(branch)
+        if not path or (not Path(path).exists() and not hasattr(self,'info')):
+            print('ALREADY REMOVED');return
+        if Path(path).exists() and self.agent_dirty(args.name,Path(path)):
+            self.audit_deny('DIRTY_WORKTREE','commit or discard changes before removal')
+        exists=branch in self.audit_git('for-each-ref','--format=%(refname:short)','refs/heads/'+branch).splitlines()
+        commits=self.audit_git('log','--oneline',self.audit_main()+'..'+branch) if exists else ''
+        if commits: print(commits)
+        if not args.yes and input('Remove worktree and keep branch? Type y: ')!='y':
+            self.audit_deny('NOT_CONFIRMED','removal cancelled')
+        self.remove_registered_agent(args.name,Path(path))
+        Audit(self).append('remove_agent',branch=branch)
+        print('REMOVED '+args.name)
+
+    def agent_dirty(self, name, path):
+        return git(path,'status','--porcelain')
+
+    def remove_registered_agent(self, name, path):
+        self.audit_git('worktree','remove',str(path))
+
+    def temp_root(self):
+        return self.directory.parent/'tmp'
+
+    def register_temp(self, token, kind):
+        root=self.temp_root();root.mkdir(mode=0o700,parents=True,exist_ok=True)
+        self.audit_ownership(root)
+        marker=root/(token+'.json')
+        with marker.open('x') as stream:
+            os.chmod(marker,0o600);self.audit_ownership(marker)
+            stream.write(canonical(dict(token=token,kind=kind)).decode());stream.flush();os.fsync(stream.fileno())
+        return marker
+
+    def cleanup(self, args):
+        self.audit_owner()
+        removed=[];root=self.temp_root()
+        for marker in sorted(root.glob('*.json')):
+            if marker.is_symlink(): continue
+            try: record=json.loads(marker.read_bytes())
+            except (ValueError,OSError): continue
+            token=record.get('token')
+            if not isinstance(token,str) or not re.fullmatch('[a-f0-9]{32}',token) or marker.name!=token+'.json': continue
+            if record.get('kind') not in ('worktree','runner'): continue
+            locks=root.parent/'locks';lock_path=locks/('temp-'+token+'.lock')
+            if args.dry_run and not lock_path.exists():
+                print(str(root/token));continue
+            if not args.dry_run:
+                locks.mkdir(mode=0o700,exist_ok=True);self.audit_ownership(locks)
+            with lock_path.open('r' if args.dry_run else 'a+') as held:
+                if not args.dry_run:
+                    self.audit_ownership(Path(held.name));os.chmod(held.name,0o600)
+                try:fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                except BlockingIOError:continue
+                print(str(root/token))
+                if not args.dry_run:
+                    self.remove_temp(record);marker.unlink();removed.append(token)
+        if not args.dry_run: Audit(self).append('cleanup',removed=removed)
+
+    def remove_temp(self, record):
+        if record['kind']!='worktree': self.audit_deny('INVALID_ARGUMENT','unknown temporary resource')
+        path=self.temp_root()/record['token']
+        checkout=path/'checkout'
+        if path.is_symlink(): self.audit_deny('UNSAFE_PATH','temporary resource is a symlink')
+        if checkout.exists():
+            self.audit_git('worktree','remove','--force',str(checkout))
+        if path.exists(): shutil.rmtree(path)
+
+    def status_all(self, args):
+        if getattr(args, 'notify', False):
+            self.audit_owner()
+            self.notify_expiring()
+        self.audit_report_break()
+        rows=self.summaries()
+        if args.json: print(canonical(rows).decode())
+        else:
+            for r in rows: print('{branch} {author} ahead={ahead} {verification} {acceptance} {next_step}'.format(**r))
+
+    def list_agents(self, args):
+        self.audit_report_break()
+        rows=self.summaries()
+        paths=self.audit_paths()
+        known={row['branch'] for row in rows}
+        for branch,path in paths.items():
+            if branch.startswith('agent/') and branch not in known:
+                rows.append(dict(branch=branch, author=branch.removeprefix('agent/'), ahead=0,
+                                 verification='NONE', acceptance='NONE', next_step='verify'))
+        for row in rows:
+            row['name']=row['author']
+            row['path']=paths.get(row['branch'])
+            ref=row['branch'] if row['branch'] in known else self.audit_main()
+            row['last_commit_at']=self.audit_git('show','-s','--format=%cI',ref)
+        if args.json: print(canonical(rows).decode())
+        else:
+            for r in rows: print('{name} {path} {branch} {last_commit_at} {verification}'.format(**r))
+
+    def check_merge(self, args):
+        Audit(self).scan()  # broken log cannot accept a check event
+        try:
+            _, v=self.check_acceptance(args.identifier)
+        except self.audit_refusal() as exc:
+            code=self.audit_code(exc)
+            Audit(self).append('check_merge', result=code)
+            raise
+        Audit(self).append('check_merge', branch=v['branch'])
+        print('OK')
+
+
+def add_commands(commands, enforced=False):
+    for name in ('history','check-merge','list-agents','audit','export-audit','remove-agent','cleanup'):
+        parser=commands.add_parser(name)
+        if enforced: parser.add_argument('project')
+        if name=='history':
+            parser.add_argument('--since')
+            parser.add_argument('--branch')
+            parser.add_argument('--json',action='store_true')
+        elif name=='check-merge': parser.add_argument('identifier')
+        elif name=='list-agents': parser.add_argument('--json',action='store_true')
+        elif name=='export-audit': parser.add_argument('destination')
+        elif name=='remove-agent':
+            parser.add_argument('name');parser.add_argument('--yes',action='store_true')
+        elif name=='cleanup': parser.add_argument('--dry-run',action='store_true')
+        else:
+            subs=parser.add_subparsers(dest='audit_command',required=True)
+            verify=subs.add_parser('verify')
+            expected=verify.add_mutually_exclusive_group()
+            expected.add_argument('--expect-head')
+            expected.add_argument('--expect-seq',type=int)
+            reseal=subs.add_parser('reseal')
+            reseal.add_argument('--reason',required=True)
+
+
+def invoke(gates, args):
+    mutating=args.command in ('verify','accept','merge','remove-agent') or (args.command=='cleanup' and not args.dry_run) or (args.command=='status' and args.notify)
+    audit=Audit(gates)
+    if mutating:
+        audit.recover()
+        pending=getattr(gates,'recover_pending',None)
+        if pending: pending()
+        audit.recover()
+    try:
+        getattr(gates,args.command.replace('-','_'))(args)
+    except Broken as exc:
+        gates.audit_deny('AUDIT_BROKEN', str(exc))
+    except gates.audit_refusal() as exc:
+        if mutating and gates.audit_code(exc) not in ('AUDIT_BROKEN','AUDIT_UNAVAILABLE'):
+            audit.append('deny',branch=getattr(args,'branch','') or '',result=gates.audit_code(exc))
+        raise
+
+
+obs = SimpleNamespace(Audit=Audit, Observability=Observability, add_commands=add_commands, invoke=invoke)
+
+
+class Gates(obs.Observability):
     def __init__(self, cfg):
         self.cfg = cfg
         self.repo, self.directory = cfg["repo"], cfg["receipts"]
-        self.directory.mkdir(parents=True, exist_ok=True)
-
     @contextlib.contextmanager
-    def lock(self):
-        # Serialize CLI state transitions across all worktrees of this repository.
-        with (self.directory.parent / "lock").open("a") as stream:
+    def lock(self, read_only=False):
+        # Read paths never create a state directory or a lock inode.
+        lock_path = self.directory.parent / "lock"
+        if read_only and not lock_path.exists():
+            yield
+            return
+        if not read_only:
+            self.directory.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("r" if read_only else "a") as stream:
             fcntl.flock(stream, fcntl.LOCK_EX)
             try:
                 yield
             finally:
                 fcntl.flock(stream, fcntl.LOCK_UN)
+
+    def audit_deny(self, code, text):
+        raise Deny(code, text)
+
+    def audit_refusal(self):
+        return Deny
+
+    def audit_code(self, exc):
+        return exc.code
+
+    def audit_owner(self):
+        # Cooperative identity is self-declared, as documented since v0.2.
+        return None
+
+    def audit_main(self):
+        return self.cfg["MAIN_BRANCH"]
+
+    def audit_git(self, *args):
+        return git(self.repo, *args)
+
+    def audit_paths(self):
+        paths = {}
+        for block in git(self.repo, "worktree", "list", "--porcelain").split("\n\n"):
+            items = dict(line.split(" ", 1) for line in block.splitlines() if " " in line)
+            if "branch" in items:
+                paths[items["branch"].removeprefix("refs/heads/")] = items["worktree"]
+        return paths
 
     def clean(self):
         if git(self.repo, "status", "--porcelain"):
@@ -157,6 +751,8 @@ class Gates:
 
     def write(self, record):
         record = dict(record)
+        if "audit_seq" not in record:
+            obs.Audit(self).prepare(record)
         record["id"] = receipt_id(record)
         path = self.directory / (record["kind"] + "-" + record["id"] + ".json")
         # Exclusive creation prevents overwriting evidence.
@@ -164,6 +760,7 @@ class Gates:
             stream.write(canonical(record))
             stream.flush()
             os.fsync(stream.fileno())
+        obs.Audit(self).receipt_event(record)
         return record
 
     def load(self, kind, identifier):
@@ -228,8 +825,11 @@ class Gates:
         return policy_files
 
     def test(self, commit):
-        with tempfile.TemporaryDirectory(prefix="agent-gates-test-") as temp:
-            worktree = Path(temp) / "checkout"
+        token=os.urandom(16).hex()
+        marker=self.register_temp(token,'worktree')
+        temp=self.temp_root()/token;temp.mkdir(mode=0o700)
+        try:
+            worktree = temp / "checkout"
             git(self.repo, "worktree", "add", "--detach", str(worktree), commit)
             try:
                 started = time.monotonic()
@@ -261,6 +861,9 @@ class Gates:
             finally:
                 # Only the throwaway test checkout is removed, including generated files.
                 git(self.repo, "worktree", "remove", "--force", str(worktree))
+        finally:
+            if temp.exists(): shutil.rmtree(temp)
+            marker.unlink(missing_ok=True)
 
     def verify(self, args):
         author = args.branch.removeprefix("agent/")
@@ -308,6 +911,7 @@ class Gates:
             "verdict": "ACCEPT" if result["exit"] == 0 and not baseline.get("timed_out") else "REJECT",
             "created_at": stamp(), "tool_version": VERSION,
         }
+        obs.Audit(self).prepare(record)
         record["id"] = receipt_id(record)
         (self.directory / (record["id"] + ".log")).write_bytes(output)
         if baseline_output is not None:
@@ -341,6 +945,7 @@ class Gates:
 
     def accept(self, args):
         verification, raw = self.load("verification", args.identifier)
+        obs.Audit(self).require_valid(verification)
         self.verdict(verification)
         self.test_command(verification)
         self.fresh(verification)
@@ -366,6 +971,7 @@ class Gates:
                   "expires_at": (datetime.now(timezone.utc) +
                                  timedelta(hours=self.cfg["ACCEPT_TTL_HOURS"])).isoformat().replace("+00:00", "Z"),
                   "signature": None, "allow_policy_change": args.allow_policy_change}
+        obs.Audit(self).prepare(record)
         key = self.cfg.get("OWNER_SIGNING_KEY")
         if key:
             signed = run(["ssh-keygen", "-Y", "sign", "-f", key, "-n", "agent-gates"],
@@ -387,6 +993,7 @@ class Gates:
             except (ValueError, TypeError):
                 raise Deny("RECEIPT_TAMPERED", "invalid acceptance")
         acceptance, _ = self.load("acceptance", identifier)
+        obs.Audit(self).require_valid(acceptance)
         self.signature(acceptance)
         try:
             expired = clock(acceptance["expires_at"]) <= datetime.now(timezone.utc)
@@ -395,6 +1002,7 @@ class Gates:
         if expired:
             raise Deny("ACCEPTANCE_EXPIRED", "acceptance TTL has elapsed")
         verification, raw = self.load("verification", acceptance["verification_id"])
+        obs.Audit(self).require_valid(verification)
         if digest(raw) != acceptance["verification_sha256"]:
             raise Deny("RECEIPT_TAMPERED", "accepted verification bytes changed")
         self.verdict(verification)
@@ -440,7 +1048,7 @@ class Gates:
             git(self.repo, "reset", "--merge", verification["base_sha"])
             raise Deny("MERGE_RESULT_CHANGED", "committed tree differs; merge rolled back")
         record = self.write({"kind": "merge", "schema": 1, "acceptance_id": acceptance["id"],
-                             "merge_commit": commit, "merged_by": os.environ.get("USER", "unknown"),
+                             "merge_commit": commit, "merged_by": self.audit_actor(),
                              "created_at": stamp()})
         bundle = canonical({"verification": verification, "acceptance": acceptance, "merge": record})
         blob = run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"], data=bundle)
@@ -450,18 +1058,25 @@ class Gates:
         print(record["id"])
 
     def status(self, args):
+        if args.all:
+            return self.status_all(args)
+        if args.notify:
+            self.audit_owner()
+            raise Deny("INVALID_ARGUMENT", "--notify requires --all")
+        self.audit_report_break()
         for path in sorted(self.directory.glob("verification-*.json")):
             identifier = path.stem.removeprefix("verification-")
             try:
                 verification, _ = self.load("verification", identifier)
                 if args.branch and verification["branch"] != args.branch:
                     continue
+                obs.Audit(self).require_valid(verification)
                 self.verdict(verification)
                 self.test_command(verification)
                 self.fresh(verification)
                 state = "VALID"
             except Deny as exc:
-                state = exc.code
+                state = "INVALIDATED" if exc.code == "RECEIPT_INVALIDATED" else exc.code
             print("verification " + identifier + " " + state)
         for path in sorted(self.directory.glob("acceptance-*.json")):
             identifier = path.stem.removeprefix("acceptance-")
@@ -473,7 +1088,7 @@ class Gates:
                 self.check_acceptance(identifier)
                 state = "VALID"
             except Deny as exc:
-                state = exc.code
+                state = "INVALIDATED" if exc.code == "RECEIPT_INVALIDATED" else exc.code
             try:
                 unsigned = json.loads(path.read_bytes()).get("signature") is None
             except (OSError, ValueError, AttributeError):
@@ -499,13 +1114,14 @@ def main():
         parser.add_argument("old")
         parser.add_argument("new")
         parser.add_argument("--key", required=True)
+        parser.add_argument("--audit-export")
         parser.add_argument("--repository", default="HlinorAI/hlinor-agent-gates")
         args = parser.parse_args(sys.argv[3:])
         spec = importlib.util.spec_from_file_location("github_verify", Path(__file__).resolve().parent / "github_verify.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         try:
-            record = module.attest(Path.cwd(), args.old, args.new, args.key, args.repository)
+            record = module.attest(Path.cwd(), args.old, args.new, args.key, args.repository, args.audit_export)
             print("\n".join(record["commits"]))
             return 0
         except (module.Invalid, OSError, ValueError) as exc:
@@ -516,9 +1132,9 @@ def main():
     if installed or (len(sys.argv) > 1 and sys.argv[1] in ("enforce", "doctor")):
         source = Path(__file__).resolve().parent
         # Validate before importing project-controlled Python into a root process.
-        if sys.argv[1:3] == ["enforce", "init"]:
+        if sys.argv[1:3] in (["enforce", "init"], ["enforce", "upgrade"]):
             paths = [source / name for name in
-                     ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py", "github_verify.py", "github_protect.py")]
+                     ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py", "github_verify.py", "github_protect.py", "ag-notify", "ag_notify.py")]
             paths += [source, *source.parents]
             trusted = (source.name == "bin" and ".agent-gates" not in source.parts
                        and ".agent-gates" not in Path(__file__).absolute().parts
@@ -552,6 +1168,10 @@ def main():
     merge.add_argument("identifier")
     status = commands.add_parser("status")
     status.add_argument("branch", nargs="?")
+    status.add_argument("--all", action="store_true")
+    status.add_argument("--json", action="store_true")
+    status.add_argument("--notify", action="store_true")
+    obs.add_commands(commands)
     args = parser.parse_args()
     if args.command in ("verify", "status") and (
             getattr(args, "branch", None) is not None and
@@ -560,8 +1180,11 @@ def main():
     try:
         git_version()
         gates = Gates(config())
-        with gates.lock():
-            getattr(gates, args.command)(args)
+        read_only = (args.command=="cleanup" and args.dry_run) or args.command in ("history", "list-agents") or (
+            args.command == "status" and not args.notify) or (
+            args.command == "audit" and args.audit_command == "verify")
+        with gates.lock(read_only=read_only):
+            obs.invoke(gates, args)
         return 0
     except Deny as exc:
         print("DENY " + exc.code + ": " + " ".join(exc.text.splitlines()))

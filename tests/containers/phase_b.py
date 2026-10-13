@@ -100,6 +100,9 @@ def check_signature(record, owner_signature=False):
 def fixture(record, signed=False):
     record=dict(record); record.pop('id',None)
     if signed:
+        # Owner-approved fixture: re-sign an expired acceptance in a free audit slot.
+        rows=[json.loads(line) for line in (RECEIPTS/'audit.jsonl').read_text().splitlines()]
+        record['audit_seq']=len(rows)+1; record['audit_prev']=rows[-1]['hash']
         record['signature']=None
         record['signature']=run('ssh-keygen','-Y','sign','-f','/root/.ssh/agent-gates-owner','-n','agent-gates',data=canon(record).decode()).stdout
     record['id']=hashlib.sha256(canon(record)).hexdigest()[:12]
@@ -136,7 +139,7 @@ try:
     mark('signed verify, Owner accept, bare merge tree/parents, replay and status')
     published=RECEIPTS/('merge-'+m+'.json'); pending=RECEIPTS/('pending-'+m+'.json')
     published.rename(pending)
-    gate('codex','status','project')
+    verify()  # v0.6: recovery belongs to state-changing commands, never status
     assert published.exists() and not pending.exists() and main()==mr['merge_commit']
     mark('signed journal recovers a committed merge without moving main')
 

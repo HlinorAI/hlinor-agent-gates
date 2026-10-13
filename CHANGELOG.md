@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 — 2026-10-13
+
+- Added canonical hash-chained audit events, receipt seq/prev anchors, exact-slot recovery and Owner reseal retaining discarded/unreadable evidence and invalidating its receipts.
+- Added status --all, history, check-merge and list-agents, with read-only paths and explicit stale/expired/invalidated states.
+- Optional JSON notifier hooks have a ten-second deadline, audited failure, no recursive notifications and successful-expiry deduplication. Enforced hooks use a separate ag-notify UID and protected secrets.
+- Added dirty-safe agent removal, enforced home archiving, registered-resource cleanup and locked audit exports with SHA256 manifests.
+- Publish attestations accept --audit-export and sign the chain and audit_head; offline Action checks validate receipt audit ordering and predecessors.
+- Enforced upgrade migrates protected code/sudoers; doctor and scheduler cleanup recognize Debian and RHEL crontab paths. Cooperative actors use the OS UID identity.
+- Added fake-hook, offline-publication and disposable-container regressions. macOS/GitHub CI results remain to be checked after publication.
+
 ## 0.5.0 — 2026-10-10
 
 - Owner amendment: PR checks are advisory. Required-check names do not pin a PR workflow; the Owner must review workflow/checker changes. Main detection and notification require the verification workflow to remain enabled and unchanged.

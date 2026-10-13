@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$#" -eq 0 ] || exit 1
+exec /usr/bin/python3 -I /opt/agent-gates/bin/ag_notify.py

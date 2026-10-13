@@ -26,6 +26,8 @@ jobs:
         run: bash tests/test_setup.sh
       - name: GitHub verification and fake gh (offline, both OSes)
         run: bash tests/test_github.sh && bash tests/test_github_tools.sh
+      - name: Observability (offline, both OSes)
+        run: bash tests/test_observability.sh && bash tests/test_observability_b.sh
   enforced:
     runs-on: ubuntu-latest
     steps:
@@ -34,3 +36,7 @@ jobs:
         run: bash tests/test_enforced.sh
       - name: GitHub receipt notes (disposable Linux container)
         run: bash tests/test_github_enforced.sh
+      - name: Observability and lifecycle (disposable Linux containers)
+        run: bash tests/test_observability_enforced.sh && bash tests/test_observability_b_enforced.sh
+      - name: RHEL scheduler paths (disposable Fedora container)
+        run: bash tests/test_rhel.sh

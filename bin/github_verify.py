@@ -14,8 +14,9 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tarfile
 
-VERSION = '0.5.0'
+VERSION = '0.6.0'
 RECEIPTS = 'refs/notes/agent-gates'
 PUBLISH = 'refs/notes/agent-gates-publish'
 
@@ -188,7 +189,69 @@ def check_merge(repo, commit, accept_keys, used, expected_base=None):
             'tests': v['result'].get('summary', ''), 'acceptance_id': a['id'], 'result': mode}, bundle
 
 
-def attest(repo, old, new, key, name):
+def audit_chain(raw):
+    rows=[];head='0'*64
+    for line in raw.splitlines(keepends=True):
+        try:row=json.loads(line)
+        except ValueError:raise Invalid('unreadable audit chain')
+        require(isinstance(row,dict) and canonical(row)+b'\n'==line,'noncanonical audit event')
+        require(type(row.get('seq')) is int and row['seq']==len(rows)+1 and row.get('prev')==head,
+                'audit sequence/predecessor mismatch')
+        require(row.get('hash')==digest(canonical({k:v for k,v in row.items() if k!='hash'})),
+                'audit hash mismatch')
+        head=row['hash'];rows.append(row)
+    return rows,dict(seq=len(rows),hash=head)
+
+
+def audit_snapshot(repo, export):
+    if export:
+        with tarfile.open(export,'r:gz') as archive:
+            members=archive.getmembers()
+            require(all(m.isfile() and '/' not in m.name and m.name not in ('.','..') for m in members),
+                    'unsafe audit export member')
+            require(len({m.name for m in members})==len(members),'duplicate audit export member')
+            files={m.name:archive.extractfile(m).read() for m in members}
+        require('MANIFEST.json' in files,'audit export manifest missing')
+        manifest=json.loads(files.pop('MANIFEST.json'))
+        require(manifest.get('files')=={name:digest(data) for name,data in files.items()},'audit export hash mismatch')
+        rows,head=audit_chain(files.get('audit.jsonl',b''))
+        require(manifest.get('seq')==head['seq'] and manifest.get('head')==head['hash'],'audit export head mismatch')
+        return rows,head
+    common=Path(git(repo,'rev-parse','--path-format=absolute','--git-common-dir').decode().strip())
+    path=common/'agent-gates/receipts/audit.jsonl'
+    require(path.is_file(),'server audit missing: use --audit-export from export-audit')
+    return audit_chain(path.read_bytes())
+
+
+def check_audit_attestation(record, bundles, commits):
+    audited=[bundles[c] for c in commits if c in bundles and 'verification' in bundles[c]
+             and any('audit_seq' in bundles[c][kind] for kind in ('verification','acceptance','merge'))]
+    if not audited:return  # Immutable v0.5 receipts predate audit anchors.
+    require('audit_chain' in record and 'audit_head' in record,'publish audit anchor missing')
+    rows,head=audit_chain(b''.join(canonical(row)+b'\n' for row in record['audit_chain']))
+    require(record['audit_head']==head,'publish audit head mismatch')
+    invalidated={i for row in rows if row.get('event')=='reseal' for i in row.get('invalidated_receipts',[])}
+    last_merge=0
+    for bundle in audited:
+        seqs=[]
+        for kind,event in (('verification','verify'),('acceptance','accept'),('merge','merge')):
+            receipt=bundle[kind];seq=receipt.get('audit_seq')
+            if 'audit_seq' not in receipt and 'audit_prev' not in receipt and not seqs:
+                continue  # Immutable pre-v0.6 evidence may precede new anchored receipts.
+            require(type(seq) is int and 0<seq<=len(rows),'receipt audit sequence out of range')
+            row=rows[seq-1]
+            require(receipt['id'] not in invalidated,'receipt invalidated by reseal')
+            require(row['prev']==receipt.get('audit_prev') and
+                    (row.get('event')==event or (row.get('event')=='recovered' and
+                     row.get('original_event')==event and row.get('original_audit_seq')==seq and
+                     row.get('original_audit_prev')==receipt.get('audit_prev'))),'receipt audit binding mismatch')
+            seqs.append(seq)
+        require(seqs and all(left<right for left,right in zip(seqs,seqs[1:])) and
+                seqs[-1]>last_merge,'receipt audit ordering mismatch')
+        last_merge=seqs[-1]
+
+
+def attest(repo, old, new, key, name, audit_export=None):
     old = git(repo, 'rev-parse', '--verify', old + '^{commit}').decode().strip()
     new = git(repo, 'rev-parse', '--verify', new + '^{commit}').decode().strip()
     git(repo, 'merge-base', '--is-ancestor', old, new)
@@ -196,6 +259,11 @@ def attest(repo, old, new, key, name):
     record = {'kind': 'publish', 'schema': 1, 'repo': name, 'old_main': old, 'new_main': new,
               'commits': commits, 'created_at': datetime.now().astimezone().isoformat(),
               'tool_version': VERSION, 'signature': None}
+    gate_commits=[c for c in commits if git(repo,'show','-s','--format=%B',c).decode().startswith('agent-gates merge')]
+    if gate_commits:
+        audited=any('audit_seq' in note(repo,RECEIPTS,c)['merge'] for c in gate_commits)
+        if audited or audit_export:
+            record['audit_chain'],record['audit_head']=audit_snapshot(repo,audit_export)
     result = subprocess.run(['ssh-keygen', '-Y', 'sign', '-f', str(key), '-n', 'agent-gates-publish'],
                             input=payload(record), capture_output=True)
     require(result.returncode == 0, 'could not sign publish attestation')
@@ -237,6 +305,7 @@ def check(repo, event, before, after, owner_key, name, rows=None, bundles=None, 
                 rows.append({'commit': commit, 'kind': 'Owner attested',
                              'author': git(repo, 'show', '-s', '--format=%an', commit).decode().strip(),
                              'verifier': '', 'tests': '', 'acceptance_id': '', 'result': 'PASS'})
+        check_audit_attestation(attestation,bundles,commits)
     else:
         bundles[after] = note(repo, RECEIPTS, after)
         row, bundle = check_merge(repo, after, accept_keys, used, before)

@@ -5,6 +5,7 @@ import contextlib
 import fcntl
 import fnmatch
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -133,7 +134,13 @@ def runner_main(argv):
     os.execve("/bin/bash", ["bash", "-c", argv[2]], env)
 
 
-class Gates:
+_obs_spec = importlib.util.spec_from_file_location("observability", Path(__file__).resolve().parent / "agent_gates.py")
+_obs_module = importlib.util.module_from_spec(_obs_spec)
+_obs_spec.loader.exec_module(_obs_module)
+obs = _obs_module.obs
+
+
+class Gates(obs.Observability):
     def __init__(self, project, actor):
         self.project, self.actor = API.project_name(project), actor
         self.info = API.metadata(project)
@@ -145,6 +152,86 @@ class Gates:
         self.directory = API.STATE / "projects" / project / "receipts"
         self.gate = pwd.getpwnam("agent-gates")
         self.cfg = None
+
+    def audit_deny(self, code, text):
+        deny(code, text)
+
+    def audit_refusal(self):
+        return API.Refusal
+
+    def audit_code(self, exc):
+        return str(exc).split(":", 1)[0].removeprefix("DENY ")
+
+    def audit_owner(self):
+        if os.geteuid() != 0 or os.environ.get("SUDO_USER", "root") != "root":
+            deny("ROOT_REQUIRED", "only Owner root may run this command")
+
+    def audit_main(self):
+        return "main"
+
+    def audit_git(self, *args):
+        return self.git(*args)
+
+    def audit_paths(self):
+        return {"agent/"+name.removeprefix("agent-"): str(Path(pwd.getpwnam(name).pw_dir)/"work"/self.project)
+                for name in self.info["users"]}
+
+    def notify_config(self):
+        return self.policy(self.head('main'))
+
+    def notify_run(self, command, message):
+        invocation=['/usr/bin/sudo','-n','-u','ag-notify',str(API.CODE/'bin/ag-notify')]
+        # Serialize gate-side: an entire-UID kill must not kill another waiting notifier.
+        with (API.STATE/'notify.lock').open('r+') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            try:
+                result=subprocess.run(invocation,input=json.dumps(dict(command=command,message=message)).encode(),
+                                      capture_output=True,env=environment(),timeout=15)
+                try:return json.loads(result.stdout).get('ok') is True
+                except (ValueError,AttributeError):return False
+            finally:
+                # Same no-argument sudo permission, cleanup performed by ag-notify itself.
+                subprocess.run(invocation,input=b'{"cleanup":true}',capture_output=True,
+                               env=environment(),timeout=5)
+
+    def agent_dirty(self, name, path):
+        # A root status may execute project-controlled clean filters. Run it as the agent.
+        return API.run('/usr/bin/git','-c','core.fsmonitor=false','-c','core.hooksPath=/dev/null',
+                       '-C',str(path),'status','--porcelain',uid='agent-'+name,env=environment())
+
+    def remove_registered_agent(self, name, path):
+        account=pwd.getpwnam('agent-'+name)
+        # A home may host more than one registered project. Do not archive another project.
+        for manifest in (API.CODE/'projects').glob('*.json'):
+            if manifest.stem!=self.project and account.pw_name in json.loads(manifest.read_bytes())['users']:
+                deny('AGENT_IN_USE','agent remains registered in another project')
+        API.run('usermod','--lock','--shell','/usr/sbin/nologin',account.pw_name)
+        API.group(account.pw_name)
+        groups=[API.grp.getgrgid(gid).gr_name for gid in os.getgrouplist(account.pw_name,account.pw_gid)
+                if gid!=API.grp.getgrnam('agents').gr_gid and gid!=API.grp.getgrnam(account.pw_name).gr_gid]
+        API.run('usermod','--gid',account.pw_name,'--groups',','.join(groups),account.pw_name)
+        archive=API.STATE/'archive';API.secure_dir(archive,0,0,0o700)
+        while True:
+            target=archive/(name+'-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
+            if not target.exists():break
+        os.rename(account.pw_dir,target)
+        API.run('usermod','--home',str(target),account.pw_name)
+        self.info['users'].remove(account.pw_name)
+        manifest=API.CODE/'projects'/(self.project+'.json')
+        temporary=manifest.with_suffix('.new');temporary.write_text(json.dumps(self.info,sort_keys=True))
+        os.chown(temporary,0,0);temporary.chmod(0o644);os.replace(temporary,manifest)
+        print('ARCHIVED '+str(target))
+
+    def remove_temp(self, record):
+        if record['kind']!='runner':deny('INVALID_ARGUMENT','unknown temporary resource')
+        result=self.runner('remove',record['token'])
+        if result.returncode:deny('RUNNER_CLEANUP_FAILED','cannot remove registered runner export')
+
+    def cleanup(self, args):
+        self.audit_owner()
+        with (API.STATE/'runner.lock').open('r+') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            super().cleanup(args)
 
     def git_result(self, *args, data=None):
         command = ["/usr/bin/git", "-c", "safe.directory=" + str(self.repo),
@@ -192,21 +279,26 @@ class Gates:
         return values
 
     @contextlib.contextmanager
-    def lock(self):
+    def lock(self, read_only=False):
         path = API.STATE / "projects" / self.project / "locks/gates.lock"
-        with path.open("a+") as stream:
-            os.chmod(path, 0o600)
-            if os.geteuid() == 0:
-                os.chown(path, self.gate.pw_uid, self.gate.pw_gid)
+        if read_only and not path.exists():
+            yield
+            return
+        with path.open("r" if read_only else "a+") as stream:
+            if not read_only:
+                os.chmod(path, 0o600)
+                if os.geteuid() == 0:
+                    os.chown(path, self.gate.pw_uid, self.gate.pw_gid)
             fcntl.flock(stream, fcntl.LOCK_EX)
             try:
-                self.recover_pending()
                 yield
             finally:
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
     def recover_pending(self):
         for path in self.directory.glob("pending-*.json"):
+            if path.stem.removeprefix("pending-") in obs.Audit(self).invalidated():
+                continue
             try:
                 raw = path.read_bytes()
                 record = json.loads(raw)
@@ -235,6 +327,7 @@ class Gates:
         return result.stdout.decode().splitlines()[0]
 
     def sign(self, record):
+        obs.Audit(self).prepare(record)
         key = API.OWNER_KEY if record["kind"] == "acceptance" else API.STATE / "gate_ed25519"
         namespace = "agent-gates" if record["kind"] == "acceptance" else "agent-gates-receipt"
         result = subprocess.run(["/usr/bin/ssh-keygen", "-Y", "sign", "-f", str(key), "-n", namespace],
@@ -253,20 +346,28 @@ class Gates:
             deny("BAD_SIGNATURE", "mandatory receipt signature missing")
         if acceptance and record.get("owner") != "root":
             deny("BAD_SIGNATURE", "acceptance must be signed by Owner")
-        with tempfile.TemporaryDirectory(prefix="signature-", dir=self.directory.parent) as temp:
-            signature = Path(temp) / "signature"
-            signature.write_text(record["signature"])
+        # Kernel-only scratch descriptors keep read paths free of filesystem writes.
+        signature_fd = os.memfd_create("agent-gates-signature")
+        allowed_fd = None
+        try:
+            os.write(signature_fd, record["signature"].encode())
             if acceptance:
-                allowed = API.CODE / "owner_allowed_signers"
+                allowed = str(API.CODE / "owner_allowed_signers")
                 identity, namespace = "root", "agent-gates"
             else:
-                allowed = Path(temp) / "allowed_signers"
-                allowed.write_text("agent-gates " + (API.STATE / "gate_ed25519.pub").read_text())
+                allowed_fd = os.memfd_create("agent-gates-signers")
+                os.write(allowed_fd, ("agent-gates " + (API.STATE / "gate_ed25519.pub").read_text()).encode())
+                allowed = "/proc/self/fd/" + str(allowed_fd)
                 identity, namespace = "agent-gates", "agent-gates-receipt"
-            result = subprocess.run(["/usr/bin/ssh-keygen", "-Y", "verify", "-f", str(allowed),
-                                     "-I", identity, "-n", namespace, "-s", str(signature)],
+            descriptors = (signature_fd,) if allowed_fd is None else (signature_fd, allowed_fd)
+            result = subprocess.run(["/usr/bin/ssh-keygen", "-Y", "verify", "-f", allowed,
+                                     "-I", identity, "-n", namespace, "-s", "/proc/self/fd/" + str(signature_fd)],
                                     input=signing_payload(record), stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, env=environment())
+                                    stderr=subprocess.PIPE, env=environment(), pass_fds=descriptors)
+        finally:
+            os.close(signature_fd)
+            if allowed_fd is not None:
+                os.close(allowed_fd)
         if result.returncode:
             deny("BAD_SIGNATURE", "receipt signature verification failed")
 
@@ -289,6 +390,7 @@ class Gates:
 
     def write(self, record):
         self.persist(self.directory / (record["kind"] + "-" + record["id"] + ".json"), canonical(record))
+        obs.Audit(self).receipt_event(record)
 
     def load(self, kind, value):
         if not re.fullmatch(r"[a-f0-9]{12}", value):
@@ -353,8 +455,10 @@ class Gates:
         return paths
 
     def runner(self, *args, **kwargs):
-        return subprocess.run(["/usr/bin/sudo", "-n", "-u", "ag-runner", str(API.CODE / "bin/ag-run"), *args],
-                              env=environment(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+        invocation=["/usr/bin/sudo", "-n", "-u", "ag-runner", str(API.CODE / "bin/ag-run"), *args]
+        if os.geteuid()==0:
+            invocation=["/usr/sbin/runuser","-u","agent-gates","--",*invocation]
+        return subprocess.run(invocation,env=environment(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,**kwargs)
 
     def cleanup_runner(self, token):
         result = self.runner("kill")
@@ -386,6 +490,7 @@ class Gates:
 
     def test(self, commit):
         token = os.urandom(16).hex()
+        marker=self.register_temp(token,'runner')
         started, timed_out = time.monotonic(), False
         # Gate controls the timeout/result/log. No result metadata comes from test code.
         with tempfile.TemporaryFile() as archive, tempfile.TemporaryFile() as log:
@@ -405,6 +510,7 @@ class Gates:
                     timed_out = True
                 finally:
                     self.cleanup_runner(token)
+                    marker.unlink(missing_ok=True)
                     if process.poll() is None:
                         try:
                             os.killpg(process.pid, signal.SIGKILL)
@@ -471,6 +577,7 @@ class Gates:
 
     def accept(self, args):
         verification, raw = self.load("verification", args.identifier)
+        obs.Audit(self).require_valid(verification)
         self.verdict(verification)
         self.bind_policy(verification)
         self.fresh(verification)
@@ -502,9 +609,11 @@ class Gates:
 
     def check_acceptance(self, value):
         acceptance, _ = self.load("acceptance", value)
+        obs.Audit(self).require_valid(acceptance)
         if clock(acceptance["expires_at"]) <= datetime.now(timezone.utc):
             deny("ACCEPTANCE_EXPIRED", "acceptance TTL elapsed")
         verification, raw = self.load("verification", acceptance["verification_id"])
+        obs.Audit(self).require_valid(verification)
         if digest(raw) != acceptance["verification_sha256"]:
             deny("RECEIPT_TAMPERED", "accepted verification bytes changed")
         self.verdict(verification)
@@ -549,14 +658,21 @@ class Gates:
             deny("GIT_FAILED", "atomic ref update failed")
         os.rename(pending, self.directory / ("merge-" + record["id"] + ".json"))
         self.sync_directory()
+        obs.Audit(self).receipt_event(record)
         print(record["id"])
 
     def status(self, args):
+        if args.notify:
+            self.audit_owner()
+        if args.all:
+            return self.status_all(args)
+        self.audit_report_break()
         for kind in ("verification", "acceptance", "merge"):
             for path in sorted(self.directory.glob(kind + "-*.json")):
                 value = path.stem.removeprefix(kind + "-")
                 try:
                     record, _ = self.load(kind, value)
+                    obs.Audit(self).require_valid(record)
                     if kind == "verification":
                         if args.branch and record["branch"] != args.branch:
                             continue
@@ -572,6 +688,8 @@ class Gates:
                         state = record["merge_commit"]
                 except API.Refusal as exc:
                     state = str(exc).split(":", 1)[0].removeprefix("DENY ")
+                    if state == "RECEIPT_INVALIDATED":
+                        state = "INVALIDATED"
                 print(kind + " " + value + " " + state)
 
 
@@ -598,6 +716,10 @@ def main(argv, api):
     status = commands.add_parser("status")
     status.add_argument("project")
     status.add_argument("branch", nargs="?")
+    status.add_argument("--all", action="store_true")
+    status.add_argument("--json", action="store_true")
+    status.add_argument("--notify", action="store_true")
+    obs.add_commands(commands, enforced=True)
     args = parser.parse_args(argv)
     if args.command == "accept":
         if os.geteuid() != 0:
@@ -609,11 +731,16 @@ def main(argv, api):
             deny("RECEIPT_TAMPERED", "verification missing or ambiguous")
         project, actor = matches[0].parent.parent.name, "root"
     else:
-        project, actor = args.project, API.caller()
+        project, actor = args.project, "root" if os.geteuid() == 0 else API.caller()
     if getattr(args, "branch", None) and not re.fullmatch(r"agent/[a-z0-9-]+", args.branch):
         deny("INVALID_ARGUMENT", "branch must match agent/<name>")
+    if args.command in ("audit","export-audit","remove-agent","cleanup") and os.geteuid() != 0:
+        deny("ROOT_REQUIRED", "command requires Owner root")
     gates = Gates(project, actor)
     os.umask(0o027)
-    with gates.lock():
-        getattr(gates, args.command)(args)
+    read_only = (args.command=="cleanup" and args.dry_run) or args.command in ("history", "list-agents") or (
+        args.command == "status" and not args.notify) or (
+        args.command == "audit" and args.audit_command == "verify")
+    with gates.lock(read_only=read_only):
+        obs.invoke(gates, args)
     return 0

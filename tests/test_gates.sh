@@ -114,6 +114,9 @@ t8() {
 import json,sys,hashlib,pathlib
 p=pathlib.Path(sys.argv[1]); r=json.loads(p.read_bytes())
 r['expires_at']='2000-01-01T00:00:00Z'; del r['id']
+# Owner-approved v0.6 fixture: reserve the next free audit slot.
+rows=[json.loads(line) for line in (p.parent/'audit.jsonl').read_text().splitlines()]
+r['audit_seq']=len(rows)+1; r['audit_prev']=rows[-1]['hash']
 dump=lambda x:json.dumps(x,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
 r['id']=hashlib.sha256(dump(r)).hexdigest()[:12]
 (p.parent/('acceptance-'+r['id']+'.json')).write_bytes(dump(r))
@@ -242,6 +245,9 @@ t18() {
 import hashlib,json,pathlib,sys
 path=pathlib.Path(sys.argv[1]); record=json.loads(path.read_bytes())
 record["test_cmd"]="true"; del record["id"]
+# Keep the mismatched-runner DENY test on a consistent audit chain.
+rows=[json.loads(line) for line in (path.parent/'audit.jsonl').read_text().splitlines()]
+record['audit_seq']=len(rows)+1; record['audit_prev']=rows[-1]['hash']
 dump=lambda value:json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
 record["id"]=hashlib.sha256(dump(record)).hexdigest()[:12]
 (path.parent/("verification-"+record["id"]+".json")).write_bytes(dump(record))

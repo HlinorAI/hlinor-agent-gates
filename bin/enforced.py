@@ -19,17 +19,25 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 CODE = Path("/opt/agent-gates")
 REPOS = Path("/srv/agent-gates")
 STATE = Path("/var/lib/agent-gates")
 SUDOERS = Path("/etc/sudoers.d/agent-gates")
 OWNER_KEY = Path("/root/.ssh/agent-gates-owner")
 ARCHIVE_ATTRIBUTES = "* -export-ignore -export-subst\n"
-EXPECTED_SUDOERS = """Defaults:%agents env_reset, !setenv
+PREVIOUS_SUDOERS = """Defaults:%agents env_reset, !setenv
 %agents     ALL=(agent-gates) NOPASSWD: /opt/agent-gates/bin/agent-gates verify *, /opt/agent-gates/bin/agent-gates merge *, /opt/agent-gates/bin/agent-gates status *, /opt/agent-gates/bin/gate-receive-pack *
 agent-gates ALL=(ag-runner)   NOPASSWD: /opt/agent-gates/bin/ag-run *
 """
+EXPECTED_SUDOERS = """Defaults:%agents env_reset, !setenv
+%agents     ALL=(agent-gates) NOPASSWD: /opt/agent-gates/bin/agent-gates verify *, /opt/agent-gates/bin/agent-gates merge *, /opt/agent-gates/bin/agent-gates status *, /opt/agent-gates/bin/agent-gates history *, /opt/agent-gates/bin/agent-gates check-merge *, /opt/agent-gates/bin/agent-gates list-agents *, /opt/agent-gates/bin/gate-receive-pack *
+agent-gates ALL=(ag-runner)   NOPASSWD: /opt/agent-gates/bin/ag-run *
+agent-gates ALL=(ag-notify)   NOPASSWD: /opt/agent-gates/bin/ag-notify
+"""
+KIT_FILES = ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run",
+             "enforced_runtime.py", "github_verify.py", "github_protect.py", "ag-notify", "ag_notify.py")
+
 
 
 class Refusal(Exception):
@@ -43,7 +51,7 @@ def deny(code, message):
 def run(*args, data=None, env=None, uid=None):
     command = list(args)
     if uid is not None:
-        command = ["runuser", "-u", uid, "--", *command]
+        command = ["/usr/sbin/runuser", "-u", uid, "--", *command]
     p = subprocess.run(command, input=data, text=True, stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE, env=env)
     if p.returncode:
@@ -187,50 +195,65 @@ def scheduler_users(path):
             for user in line.split("#", 1)[0].split()]
 
 
-def at_jobs():
+def at_jobs(account="ag-runner"):
     if not shutil.which("atq"):
         for path in (Path("/var/spool/cron/atjobs"), Path("/var/spool/at")):
             if path.exists() and any(path.iterdir()):
                 deny("MISSING_DEPENDENCY", "atq required to inspect existing jobs")
         return []
     return [line.split()[0] for line in run("atq").splitlines()
-            if line.split() and line.split()[-1] == "ag-runner"]
+            if line.split() and line.split()[-1] == account]
 
 
 def block_schedulers():
-    # Root provisioning only. Never grant privileged cleanup to the test gateway.
-    for name in ("cron", "at"):
-        if "ag-runner" in scheduler_users("/etc/" + name + ".allow"):
-            deny("RUNNER_SCHEDULER_ALLOWED", "remove ag-runner from " + name + ".allow")
-    for name in ("cron", "at"):
-        path = Path("/etc/" + name + ".deny")
-        users = scheduler_users(path)
-        if "ag-runner" not in users:
-            original = path.read_text() if path.exists() else ""
-            with tempfile.NamedTemporaryFile(mode="w", dir="/etc", prefix=".agent-gates-deny-", delete=False) as stream:
-                temporary = Path(stream.name)
-                stream.write(original + ("\n" if original and not original.endswith("\n") else "") + "ag-runner\n")
-            try:
-                temporary.chmod(0o644)
-                os.chown(temporary, 0, 0)
-                os.replace(temporary, path)
-            finally:
-                temporary.unlink(missing_ok=True)
-    Path("/var/spool/cron/crontabs/ag-runner").unlink(missing_ok=True)
-    for job in at_jobs():
-        if not job.isdigit():
-            deny("INVALID_SCHEDULE", "invalid at job id")
-        run("atrm", job)
+    # Root provisioning only. Never grant privileged cleanup to a test gateway.
+    for account in ("ag-runner", "ag-notify"):
+        for name in ("cron", "at"):
+            if account in scheduler_users("/etc/" + name + ".allow"):
+                deny("RUNNER_SCHEDULER_ALLOWED", "remove " + account + " from " + name + ".allow")
+    for account in ("ag-runner", "ag-notify"):
+        for name in ("cron", "at"):
+            path = Path("/etc/" + name + ".deny")
+            if account not in scheduler_users(path):
+                original = path.read_text() if path.exists() else ""
+                with tempfile.NamedTemporaryFile(mode="w", dir="/etc", prefix=".agent-gates-deny-", delete=False) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(original + ("\n" if original and not original.endswith("\n") else "") + account + "\n")
+                try:
+                    temporary.chmod(0o644); os.chown(temporary, 0, 0)
+                    os.replace(temporary, path)
+                finally:
+                    temporary.unlink(missing_ok=True)
+        for spool in ("/var/spool/cron/crontabs", "/var/spool/cron"):
+            (Path(spool) / account).unlink(missing_ok=True)
+        for job in at_jobs(account):
+            if not job.isdigit():
+                deny("INVALID_SCHEDULE", "invalid at job id")
+            run("atrm", job)
 
 
-def init(repo_arg, agent_names):
-    if sys.platform != "linux" or os.geteuid() != 0:
-        deny("ROOT_REQUIRED", "enforce init requires Linux root")
-    # Also guard direct invocation of this helper, before any provisioning.
+def setup_notifier():
+    account=pwd.getpwnam('ag-notify')
+    if grp.getgrnam('agents').gr_gid in os.getgrouplist(account.pw_name,account.pw_gid):
+        deny('UNSAFE_GROUP','ag-notify cannot belong to agents')
+    directory=Path('/etc/agent-gates')
+    secure_dir(directory,0,account.pw_gid,0o750)
+    gate=pwd.getpwnam('agent-gates')
+    lock=STATE/'notify.lock'
+    if lock.parent.exists():
+        if lock.is_symlink():deny('UNSAFE_PATH','notifier gate lock is a symlink')
+        if not lock.exists():lock.touch()
+        os.chown(lock,gate.pw_uid,gate.pw_gid);lock.chmod(0o600)
+    for name,mode in (('notify.env',0o640),('notify.lock',0o660)):
+        path=directory/name
+        if path.is_symlink():deny('UNSAFE_PATH','notifier file is a symlink')
+        if not path.exists():path.touch(mode=mode)
+        os.chown(path,0,account.pw_gid);path.chmod(mode)
+
+
+def trusted_source():
     source = Path(__file__).resolve().parent
-    paths = [source / name for name in
-             ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py", "github_verify.py", "github_protect.py")]
-    paths += [source, *source.parents]
+    paths = [source / name for name in KIT_FILES] + [source, *source.parents]
     trusted = (source.name == "bin" and ".agent-gates" not in source.parts
                and ".agent-gates" not in Path(__file__).absolute().parts
                and (source.parent / ".git").exists()
@@ -241,7 +264,72 @@ def init(repo_arg, agent_names):
     except OSError:
         trusted = False
     if not trusted:
-        deny("UNTRUSTED_SOURCE", "enforce init requires a protected root-owned kit checkout")
+        deny("UNTRUSTED_SOURCE", "enforce requires a protected root-owned kit checkout")
+    return source
+
+
+def upgrade(project):
+    if sys.platform != "linux" or os.geteuid() != 0:
+        deny("ROOT_REQUIRED", "enforce upgrade requires Linux root")
+    source = trusted_source()
+    project = project_name(project)
+    metadata(project)
+    # Code and sudoers are machine-wide. Lock every installed project, then runner.
+    import contextlib
+    with contextlib.ExitStack() as stack:
+        manifests = sorted((CODE / "projects").glob("*.json"))
+        infos = []
+        for manifest in manifests:
+            info = metadata(manifest.stem)
+            for name, expected in info["code_sha256"].items():
+                target = CODE / "bin" / name
+                st = target.lstat()
+                if target.is_symlink() or st.st_uid != 0 or st.st_mode & 0o022 or sha(target) != expected:
+                    deny("UNTRUSTED_SOURCE", "installed code differs from manifest")
+            lock = stack.enter_context((STATE / "projects" / manifest.stem / "locks/gates.lock").open("a+"))
+            gate = pwd.getpwnam("agent-gates")
+            os.chown(lock.name, gate.pw_uid, gate.pw_gid); os.chmod(lock.name, 0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            infos.append((manifest, info))
+        runner_lock = stack.enter_context((STATE / "runner.lock").open("r+"))
+        fcntl.flock(runner_lock, fcntl.LOCK_EX)
+        if SUDOERS.is_symlink() or SUDOERS.stat().st_uid != 0 or SUDOERS.stat().st_mode & 0o022:
+            deny("SUDOERS_CONFLICT", "untrusted sudoers ownership")
+        if SUDOERS.read_text() not in (PREVIOUS_SUDOERS, EXPECTED_SUDOERS):
+            deny("SUDOERS_CONFLICT", "upgrade recognizes only exact previous/current policy")
+        candidate = SUDOERS.with_name(".agent-gates-candidate")
+        candidate.write_text(EXPECTED_SUDOERS); candidate.chmod(0o440)
+        try:
+            run("visudo", "-c", "-f", str(candidate))
+            group("ag-notify"); user("ag-notify", "ag-notify", True)
+            block_schedulers()
+            setup_notifier()
+            hashes = {}
+            for name in KIT_FILES:
+                target = CODE / "bin" / name
+                with tempfile.NamedTemporaryFile(dir=CODE / "bin", delete=False) as stream:
+                    temporary = Path(stream.name)
+                    stream.write((source / name).read_bytes()); stream.flush(); os.fsync(stream.fileno())
+                temporary.chmod(0o755); os.chown(temporary, 0, 0)
+                os.replace(temporary, target)
+                hashes[name] = sha(target)
+            os.replace(candidate, SUDOERS)
+            run("visudo", "-c")
+            for manifest, info in infos:
+                info.update(version=VERSION, code_sha256=hashes,
+                            sudoers_sha256=hashlib.sha256(EXPECTED_SUDOERS.encode()).hexdigest())
+                manifest.write_text(json.dumps(info, sort_keys=True)+"\n")
+                manifest.chmod(0o644); os.chown(manifest, 0, 0)
+        finally:
+            candidate.unlink(missing_ok=True)
+    print("UPGRADED " + project + " " + VERSION)
+    return 0
+
+
+def init(repo_arg, agent_names):
+    if sys.platform != "linux" or os.geteuid() != 0:
+        deny("ROOT_REQUIRED", "enforce init requires Linux root")
+    source = trusted_source()
     for command in ("git", "sudo", "visudo", "ssh-keygen", "useradd", "groupadd", "runuser", "pkill"):
         if not shutil.which(command):
             deny("MISSING_DEPENDENCY", command)
@@ -276,6 +364,8 @@ def init(repo_arg, agent_names):
     gate_group, runner_group = group("agent-gates"), group("ag-runner")
     gate = user("agent-gates", "agent-gates", True)
     runner = user("ag-runner", "ag-runner", True)
+    group("ag-notify"); user("ag-notify", "ag-notify", True)
+    setup_notifier()
     accounts = [user("agent-" + name, "agents") for name in agent_names]
     # agents group contains agent accounts only; primary-group membership counts too.
     members = set(agents.gr_mem) | {p.pw_name for p in pwd.getpwall() if p.pw_gid == agents.gr_gid}
@@ -285,7 +375,7 @@ def init(repo_arg, agent_names):
     secure_dir(CODE / "bin", 0, 0, 0o755)
     source = Path(__file__).resolve().parent
     hashes = {}
-    for name in ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py", "github_verify.py", "github_protect.py"):
+    for name in KIT_FILES:
         path = source / name
         if not path.is_file() or path.is_symlink():
             deny("MISSING_DEPENDENCY", "trusted kit file missing: " + name)
@@ -298,10 +388,11 @@ def init(repo_arg, agent_names):
     secure_dir(REPOS, gate.pw_uid, agents.gr_gid, 0o750)
     secure_dir(STATE, gate.pw_uid, gate_group.gr_gid, 0o700)
     secure_dir(STATE / "projects", gate.pw_uid, gate_group.gr_gid, 0o700)
-    for name in ("receipts", "locks"):
+    for name in ("receipts", "locks", "tmp"):
         secure_dir(STATE / "projects" / project / name, gate.pw_uid, gate_group.gr_gid, 0o700)
     os.chown(STATE / "projects" / project, gate.pw_uid, gate_group.gr_gid)
     (STATE / "projects" / project).chmod(0o700)
+    setup_notifier()
     runner_lock = STATE / "runner.lock"
     if not runner_lock.exists():
         runner_lock.touch()
@@ -395,12 +486,27 @@ def doctor(project=None):
           ("/usr/sbin/nologin", "/sbin/nologin", "/bin/false") and account.pw_dir == "/nonexistent"
           for account in (gate, runner)))
     if os.geteuid() == 0:
-        check("runner has no crontab", not os.path.lexists("/var/spool/cron/crontabs/ag-runner"))
+        try:
+            notifier=pwd.getpwnam('ag-notify')
+            check('notifier separate UID/no login',notifier.pw_uid not in (0,gate.pw_uid,runner.pw_uid)
+                  and notifier.pw_shell in ('/usr/sbin/nologin','/sbin/nologin','/bin/false')
+                  and agents.gr_gid not in os.getgrouplist(notifier.pw_name,notifier.pw_gid))
+            secret=Path('/etc/agent-gates/notify.env');st=secret.lstat()
+            check('notifier protected secrets',not secret.is_symlink() and st.st_uid==0
+                  and st.st_gid==notifier.pw_gid and stat.S_IMODE(st.st_mode)==0o640)
+            for path,uid,gid,mode in ((Path('/etc/agent-gates'),0,notifier.pw_gid,0o750),
+                                     (Path('/etc/agent-gates/notify.lock'),0,notifier.pw_gid,0o660),
+                                     (STATE/'notify.lock',gate.pw_uid,gate.pw_gid,0o600)):
+                st=path.lstat();check('notifier boundary '+str(path),not path.is_symlink()
+                    and (st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))==(uid,gid,mode))
+        except (KeyError,OSError):check('notifier boundary',False)
+        check("runner has no crontab", all(not os.path.lexists(str(Path(spool)/account))
+              for spool in ("/var/spool/cron/crontabs", "/var/spool/cron") for account in ("ag-runner", "ag-notify")))
         check("runner has no systemd linger", not os.path.lexists("/var/lib/systemd/linger/ag-runner"))
-        check("runner has no at jobs", not at_jobs())
+        check("runner has no at jobs", not at_jobs() and not at_jobs("ag-notify"))
         for name in ("cron", "at"):
-            check("runner denied " + name, "ag-runner" in scheduler_users("/etc/" + name + ".deny")
-                  and "ag-runner" not in scheduler_users("/etc/" + name + ".allow"))
+            check("runner denied " + name, all(account in scheduler_users("/etc/" + name + ".deny")
+                  and account not in scheduler_users("/etc/" + name + ".allow") for account in ("ag-runner", "ag-notify")))
     else:
         check("runner scheduler/linger state", False, "privileged doctor required")
     all_members = set(agents.gr_mem) | {p.pw_name for p in pwd.getpwall() if p.pw_gid == agents.gr_gid}
@@ -529,13 +635,20 @@ def main(argv=None):
             if len(argv) > 2:
                 deny("INVALID_ARGUMENT", "doctor accepts at most one project")
             return doctor(argv[1] if len(argv) == 2 else None)
+        if argv[:2] == ["enforce", "remove-agent"]:
+            argv=['remove-agent',*argv[2:]]
+        if argv[:2] == ["enforce", "upgrade"]:
+            parser = argparse.ArgumentParser(prog="agent-gates enforce upgrade")
+            parser.add_argument("project")
+            args = parser.parse_args(argv[2:])
+            return upgrade(args.project)
         if argv[:2] == ["enforce", "init"]:
             parser = argparse.ArgumentParser(prog="agent-gates enforce init")
             parser.add_argument("repo")
             parser.add_argument("--agents", default="codex,claude,zcode")
             args = parser.parse_args(argv[2:])
             return init(args.repo, args.agents)
-        if argv and argv[0] in ("verify", "accept", "merge", "status", "runner"):
+        if argv and argv[0] in ("verify", "accept", "merge", "status", "runner", "history", "check-merge", "list-agents", "audit", "export-audit", "remove-agent", "cleanup"):
             if Path(__file__).resolve().parent != CODE / "bin":
                 deny("UNTRUSTED_SOURCE", "use the installed /opt/agent-gates/bin/agent-gates")
             spec = importlib.util.spec_from_file_location("enforced_runtime", CODE / "bin/enforced_runtime.py")
