@@ -273,6 +273,9 @@ class Gates(obs.Observability):
                     raise ValueError()
             except ValueError:
                 deny("INVALID_POLICY", "invalid " + key)
+        values.setdefault("AUDIT_PUBLISH", "head")
+        if values["AUDIT_PUBLISH"] not in ("head", "chain"):
+            deny("INVALID_POLICY", "invalid AUDIT_PUBLISH")
         values.setdefault("POLICY_CHANGES", "deny")
         if values["POLICY_CHANGES"] not in ("deny", "warn"):
             deny("INVALID_POLICY", "invalid POLICY_CHANGES")

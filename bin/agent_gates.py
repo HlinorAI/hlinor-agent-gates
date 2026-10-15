@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 sys.dont_write_bytecode = True
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 
 
 class Deny(Exception):
@@ -110,6 +110,9 @@ def config():
             raise ValueError()
     except ValueError:
         raise EnvironmentError_("invalid ACCEPT_TTL_HOURS")
+    values.setdefault("AUDIT_PUBLISH", "head")
+    if values["AUDIT_PUBLISH"] not in ("head", "chain"):
+        raise EnvironmentError_("invalid AUDIT_PUBLISH")
     values.setdefault("POLICY_CHANGES", "deny")
     if values["POLICY_CHANGES"] not in ("deny", "warn"):
         raise EnvironmentError_("invalid POLICY_CHANGES")
@@ -1104,25 +1107,39 @@ class Gates(obs.Observability):
 
 
 def main():
+    if sys.argv[1:2] == ["mcp"]:
+        source=Path(__file__).resolve().parent
+        spec=importlib.util.spec_from_file_location("mcp_server",source / "mcp_server.py")
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.main(sys.argv[2:],source / "agent-gates",sys.modules[__name__])
     if sys.argv[1:3] == ["github", "protect"]:
         spec = importlib.util.spec_from_file_location("github_protect", Path(__file__).resolve().parent / "github_protect.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module.main(sys.argv[3:])
-    if sys.argv[1:3] == ["publish", "attest"]:
+    if sys.argv[1:2] == ["publish"] and sys.argv[2:3] in (["attest"], ["resign-checkpoint"]):
         parser = argparse.ArgumentParser()
-        parser.add_argument("old")
-        parser.add_argument("new")
+        resign = sys.argv[2] == "resign-checkpoint"
+        if resign:
+            parser.add_argument("commit")
+            parser.add_argument("--old-key", required=True)
+        else:
+            parser.add_argument("old")
+            parser.add_argument("new")
+            parser.add_argument("--audit-export")
+            parser.add_argument("--repository", default="HlinorAI/hlinor-agent-gates")
         parser.add_argument("--key", required=True)
-        parser.add_argument("--audit-export")
-        parser.add_argument("--repository", default="HlinorAI/hlinor-agent-gates")
         args = parser.parse_args(sys.argv[3:])
         spec = importlib.util.spec_from_file_location("github_verify", Path(__file__).resolve().parent / "github_verify.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         try:
-            record = module.attest(Path.cwd(), args.old, args.new, args.key, args.repository, args.audit_export)
-            print("\n".join(record["commits"]))
+            if resign:
+                record = module.resign_checkpoint(Path.cwd(), args.commit, args.old_key, args.key)
+                print(record["new_main"])
+            else:
+                record = module.attest(Path.cwd(), args.old, args.new, args.key, args.repository, args.audit_export)
+                print("\n".join(record["commits"]))
             return 0
         except (module.Invalid, OSError, ValueError) as exc:
             print("DENY PUBLISH_ATTESTATION_FAILED: " + " ".join(str(exc).splitlines()))
@@ -1134,7 +1151,7 @@ def main():
         # Validate before importing project-controlled Python into a root process.
         if sys.argv[1:3] in (["enforce", "init"], ["enforce", "upgrade"]):
             paths = [source / name for name in
-                     ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py", "github_verify.py", "github_protect.py", "ag-notify", "ag_notify.py")]
+                     ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py", "github_verify.py", "github_protect.py", "ag-notify", "ag_notify.py", "mcp_server.py")]
             paths += [source, *source.parents]
             trusted = (source.name == "bin" and ".agent-gates" not in source.parts
                        and ".agent-gates" not in Path(__file__).absolute().parts

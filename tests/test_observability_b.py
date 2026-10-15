@@ -118,7 +118,7 @@ def attestation(f):
     spec=importlib.util.spec_from_file_location('checker',source);C=importlib.util.module_from_spec(spec);spec.loader.exec_module(C)
     for name in ('accept','publish'):F.command(['ssh-keygen','-q','-t','ed25519','-N','','-f',f.root/name])
     allowed=f.repo/'.agent-gates/allowed_signers';allowed.write_text('owner '+(f.root/'accept.pub').read_text())
-    config(f,'OWNER_SIGNING_KEY="'+str(f.root/'accept')+'"\n')
+    config(f,'AUDIT_PUBLISH=chain\nOWNER_SIGNING_KEY="'+str(f.root/'accept')+'"\n')
     base=f.git('rev-parse','main');f.branch();v=f.verify();a=f.accept(v);m=f.call('merge',a);head=f.git('rev-parse','main')
     export=f.root/'export.tar.gz';f.call('export-audit',str(export))
     # Publication checkout has notes, but no server receipts or audit state.
