@@ -5,7 +5,7 @@
 - Added a stdlib stdio MCP server with an explicit tool allow-list, strict schemas, serialized fixed-argv CLI calls, bounded untrusted output and disconnect cleanup. Owner acceptance remains terminal-only; merge tools require `--allow-merge` and existing gate permissions.
 - Added Claude Code and Codex configurations, enforced OS-identity checks and local stdio/container regression suites.
 - Publish attestations now default to `AUDIT_PUBLISH="head"`, disclosing only the audit checkpoint; `chain` explicitly preserves v0.6 full-chain evidence.
-- Offline Action verification checks receipt ordering and bounds, cross-bundle receipt uniqueness and nondecreasing audit heads against the previous publish checkpoint. Previous checkpoints use the current pinned publish key; Owner re-signing is required after rotation.
+- Offline Action verification checks receipt ordering and bounds, cross-bundle receipt uniqueness and nondecreasing audit heads against the previous publish checkpoint. Equal head sequences require equal hashes. Only checkpoint notes need the current pinned publish key; unverified checkpoints fail with PREVIOUS_HEAD_UNVERIFIED. Owner publish resign-checkpoint verifies the old signature and preserves every other field during rotation.
 - Documented head-mode privacy and integrity limits, and MCP stdin-close behavior. Tests use local signed fixtures and fake issue notifications; no real clients or GitHub calls.
 
 ## 0.6.0 — 2026-10-13

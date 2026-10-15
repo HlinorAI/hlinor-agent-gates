@@ -93,15 +93,17 @@ Publish attestation defaults to `AUDIT_PUBLISH="head"`: only the signed audit
 `seq`/`hash` checkpoint is disclosed, alongside existing receipt notes. The Action
 checks receipt bounds, strict ordering within and across bundles, unique receipt
 IDs, and nondecreasing head sequence versus the previous signed checkpoint on
-main's first-parent history. Prior notes must verify against the current pinned
-publish key. After key rotation the Owner re-signs the last checkpoint with the
-new key, preserving its contents and head; embedded keys are not trust anchors.
+main's first-parent history. Equal head sequences require equal hashes. Only
+notes containing `audit_head` are checkpoints; their signatures must verify
+against the current pinned publish key, or the Action fails with
+`PREVIOUS_HEAD_UNVERIFIED`. After key rotation the Owner re-signs the last checkpoint with the
+new key through `publish resign-checkpoint`, which first verifies the old
+signature and preserves every other field; embedded keys are not trust anchors.
 
 Head mode proves ordering and monotonic growth, not the content of non-receipt
 events such as DENY. It cannot detect rewriting hidden events, omission of a tail
 that never advanced a published checkpoint, or deletion of all external anchors.
-Preserve publish notes and independent exported checkpoints. A same-size head
-change is not detected by a sequence-only monotonicity check.
+Preserve publish notes and independent exported checkpoints.
 
 Opt-in `AUDIT_PUBLISH="chain"` retains the full chain, canonical hash and receipt
 seq/prev/event/invalidation validation, at the cost of publishing audit events.

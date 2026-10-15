@@ -251,17 +251,27 @@ def checked_head(record):
 
 def previous_head(repo, before, owner_key, name):
     # Only notes attached to earlier first-parent main commits are checkpoints.
-    noted = {line.split()[1] for line in git(repo, 'notes', '--ref=' + PUBLISH, 'list').decode().splitlines()}
+    notes = dict(line.split()[::-1] for line in
+                 git(repo, 'notes', '--ref=' + PUBLISH, 'list').decode().splitlines())
     for commit in git(repo, 'rev-list', '--first-parent', before).decode().split():
-        if commit not in noted:
+        if commit not in notes:
             continue
-        record = note(repo, PUBLISH, commit)
-        require(record.get('kind') == 'publish' and record.get('schema') == 1 and
-                record.get('repo') == name and record.get('new_main') == commit,
-                'previous publish checkpoint binding mismatch')
-        verify_signature(record, owner_key, 'owner', 'agent-gates-publish')
-        if 'audit_head' in record:
+        raw = git(repo, 'cat-file', 'blob', notes[commit])
+        try:
+            record = json.loads(raw)
+        except (ValueError, UnicodeError):
+            continue  # Unreadable historical notes are not checkpoint records.
+        if not isinstance(record, dict) or 'audit_head' not in record:
+            continue  # Owner-only pushes and unrelated notes need no current-key signature.
+        try:
+            require(canonical(record) == raw, 'checkpoint is not canonical JSON')
+            require(record.get('kind') == 'publish' and record.get('schema') == 1 and
+                    record.get('repo') == name and record.get('new_main') == commit,
+                    'previous publish checkpoint binding mismatch')
+            verify_signature(record, owner_key, 'owner', 'agent-gates-publish')
             return checked_head(record)
+        except (Invalid, OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise Invalid('PREVIOUS_HEAD_UNVERIFIED: ' + str(exc)) from exc
     return None
 
 
@@ -334,14 +344,29 @@ def attest(repo, old, new, key, name, audit_export=None):
             record['audit_publish'] = publish_mode(repo, new)
             if record['audit_publish'] == 'chain':
                 record['audit_chain'] = chain
+    return sign_publish_note(repo, new, record, key)
+
+
+def sign_publish_note(repo, commit, record, key):
     result = subprocess.run(['ssh-keygen', '-Y', 'sign', '-f', str(key), '-n', 'agent-gates-publish'],
                             input=payload(record), capture_output=True)
     require(result.returncode == 0, 'could not sign publish attestation')
-    record['signature'] = result.stdout.decode()
+    record = {**record, 'signature': result.stdout.decode()}
     # Store exact canonical bytes, without Git's text cleanup or trailing LF.
     blob = git(repo, 'hash-object', '-w', '--stdin', data=canonical(record)).decode().strip()
-    git(repo, 'notes', '--ref=' + PUBLISH, 'add', '-f', '-C', blob, new)
+    git(repo, 'notes', '--ref=' + PUBLISH, 'add', '-f', '-C', blob, commit)
     return record
+
+
+def resign_checkpoint(repo, commit, old_key, key):
+    commit = git(repo, 'rev-parse', '--verify', commit + '^{commit}').decode().strip()
+    record = note(repo, PUBLISH, commit)
+    require(record.get('kind') == 'publish' and record.get('schema') == 1 and
+            record.get('new_main') == commit, 'invalid publish checkpoint binding')
+    checked_head(record)
+    verify_signature(record, Path(old_key).read_text(), 'owner', 'agent-gates-publish')
+    # Preserve every field except signature, including time, range and audit_head.
+    return sign_publish_note(repo, commit, record, key)
 
 
 def check(repo, event, before, after, owner_key, name, rows=None, bundles=None, accept_keys=None):
@@ -383,6 +408,9 @@ def check(repo, event, before, after, owner_key, name, rows=None, bundles=None, 
             checkpoint = previous_head(repo, before, owner_key, name)
             require(checkpoint is None or current['seq'] >= checkpoint['seq'],
                     'publish audit head decreased since previous checkpoint')
+            require(checkpoint is None or current['seq'] != checkpoint['seq'] or
+                    current['hash'] == checkpoint['hash'],
+                    'publish audit hash differs at equal sequence')
     else:
         bundles[after] = note(repo, RECEIPTS, after)
         row, bundle = check_merge(repo, after, accept_keys, used, before)

@@ -137,16 +137,76 @@ print('[[]]' if '--paginate' in args else '{}')
     assert any('POST' in call['args'] and call['body']['title']=='agent-gates: main is unverified' for call in calls)
 
 
-def rotation(f):
+def resign(f, commit, old='publish', ok=True):
+    main=f.git('rev-parse','main')
+    notes=f.git('rev-parse',C.PUBLISH)
+    result=F.command([KIT/'bin/agent-gates','publish','resign-checkpoint',commit,
+                      '--old-key',f.root/(old+'.pub'),'--key',f.root/'rotated'],cwd=f.repo)
+    assert (result.returncode==0)==ok,(result.stdout,result.stderr)
+    assert f.git('rev-parse','main')==main
+    if not ok:
+        assert result.stdout.startswith('DENY PUBLISH_ATTESTATION_FAILED:'),result.stdout
+        assert f.git('rev-parse',C.PUBLISH)==notes
+    return result
+
+
+def equal_sequence(f):
     record=prepare(f)
-    prior=copy.deepcopy(record);prior.update(new_main=f.merges[0],commits=[f.merges[0]])
-    prior['audit_head']['seq']=3
-    store(f,C.PUBLISH,f.merges[0],signed(f,prior))
-    current=copy.deepcopy(record);current.update(old_main=f.merges[0],commits=[f.new])
-    store(f,C.PUBLISH,f.new,signed(f,current,'rotated'))
-    action(f,False,'trusted key',before=f.merges[0],key='rotated')
-    store(f,C.PUBLISH,f.merges[0],signed(f,prior,'rotated'))
-    action(f,True,before=f.merges[0],key='rotated')
+    # A checkpoint can include already recorded events outside its commit range.
+    prior=C.attest(f.repo,f.old,f.merges[0],f.root/'publish',NAME)
+    assert prior['audit_head']==record['audit_head']
+    record.update(old_main=f.merges[0],commits=[f.new])
+    store(f,C.PUBLISH,f.new,signed(f,record))
+    action(f,True,before=f.merges[0])
+    bad=copy.deepcopy(record);bad['audit_head']['hash']='f'*64
+    store(f,C.PUBLISH,f.new,signed(f,bad))
+    action(f,False,'hash differs at equal sequence',before=f.merges[0])
+
+
+def garbage(f):
+    record=prepare(f)
+    # Both unrelated JSON and unreadable historical notes lack a checkpoint.
+    store(f,C.PUBLISH,f.old,{'unrelated':'old note'})
+    action(f,True)
+    blob=C.git(f.repo,'hash-object','-w','--stdin',data=b'not JSON\n').decode().strip()
+    C.git(f.repo,'notes','--ref='+C.PUBLISH,'add','-f','-C',blob,f.old)
+    action(f,True)
+    # A note claiming to be a checkpoint must fail closed, rather than be skipped.
+    bad=copy.deepcopy(record);bad['new_main']=f.old;bad['signature']=None
+    store(f,C.PUBLISH,f.old,bad)
+    action(f,False,'PREVIOUS_HEAD_UNVERIFIED')
+
+
+def rotation(f):
+    prepare(f)
+    checkpoint=C.attest(f.repo,f.old,f.merges[0],f.root/'publish',NAME)
+    # A later unrelated note and old-key Owner push must not become trust anchors.
+    store(f,C.PUBLISH,f.new,{'legacy':'no audit head','signature':'not a signature'})
+    old=f.new
+    (f.repo/'owner-only').write_text('Owner push')
+    f.git('add','.');f.git('commit','-qm','Owner-only push during rotation')
+    middle=f.git('rev-parse','main')
+    owner_push=C.attest(f.repo,old,middle,f.root/'publish',NAME)
+    assert 'audit_head' not in owner_push
+    f.branch('zcode');v=f.verify('zcode');a=f.accept(v);f.call('merge',a)
+    f.new=f.git('rev-parse','main')
+    C.attest(f.repo,middle,f.new,f.root/'rotated',NAME)
+    action(f,False,'PREVIOUS_HEAD_UNVERIFIED',before=middle,key='rotated')
+    resign(f,f.merges[0])
+    updated=C.note(f.repo,C.PUBLISH,f.merges[0])
+    assert updated['signature']!=checkpoint['signature']
+    assert {k:v for k,v in updated.items() if k!='signature'} == {
+            k:v for k,v in checkpoint.items() if k!='signature'}
+    assert C.note(f.repo,C.PUBLISH,middle)==owner_push
+    action(f,True,before=middle,key='rotated')
+
+
+def wrong_old_key(f):
+    record=prepare(f)
+    before=C.canonical(record)
+    resign(f,f.new,old='accept',ok=False)
+    assert C.canonical(C.note(f.repo,C.PUBLISH,f.new))==before
+    action(f,True)
 
 
 def chain(f):
@@ -161,7 +221,10 @@ for label,fn in [('9 head default, two real gate merges, no audit rows',head),
                  ('10 out-of-order and out-of-range anchors',order),
                  ('10 repeated receipt in two bundles',duplicate),
                  ('11 rollback red and fake issue opened',rollback),
-                 ('checkpoint key rotation requires Owner re-signing',rotation),
+                 ('equal seq requires equal checkpoint hash',equal_sequence),
+                 ('historical garbage notes do not block publication',garbage),
+                 ('rotation CLI skips an intermediate headless Owner push',rotation),
+                 ('resign with wrong old key leaves checkpoint unchanged',wrong_old_key),
                  ('12 chain mode preserves full-chain verification',chain)]:
     F.case(label,fn)
 print(f'{F.passed} passed, {F.failed} failed')

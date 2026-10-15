@@ -1117,20 +1117,29 @@ def main():
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module.main(sys.argv[3:])
-    if sys.argv[1:3] == ["publish", "attest"]:
+    if sys.argv[1:2] == ["publish"] and sys.argv[2:3] in (["attest"], ["resign-checkpoint"]):
         parser = argparse.ArgumentParser()
-        parser.add_argument("old")
-        parser.add_argument("new")
+        resign = sys.argv[2] == "resign-checkpoint"
+        if resign:
+            parser.add_argument("commit")
+            parser.add_argument("--old-key", required=True)
+        else:
+            parser.add_argument("old")
+            parser.add_argument("new")
+            parser.add_argument("--audit-export")
+            parser.add_argument("--repository", default="HlinorAI/hlinor-agent-gates")
         parser.add_argument("--key", required=True)
-        parser.add_argument("--audit-export")
-        parser.add_argument("--repository", default="HlinorAI/hlinor-agent-gates")
         args = parser.parse_args(sys.argv[3:])
         spec = importlib.util.spec_from_file_location("github_verify", Path(__file__).resolve().parent / "github_verify.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         try:
-            record = module.attest(Path.cwd(), args.old, args.new, args.key, args.repository, args.audit_export)
-            print("\n".join(record["commits"]))
+            if resign:
+                record = module.resign_checkpoint(Path.cwd(), args.commit, args.old_key, args.key)
+                print(record["new_main"])
+            else:
+                record = module.attest(Path.cwd(), args.old, args.new, args.key, args.repository, args.audit_export)
+                print("\n".join(record["commits"]))
             return 0
         except (module.Invalid, OSError, ValueError) as exc:
             print("DENY PUBLISH_ATTESTATION_FAILED: " + " ".join(str(exc).splitlines()))

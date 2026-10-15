@@ -253,8 +253,10 @@ and merge receipt's `audit_seq`/`audit_prev`. The Action checks that all their
 sequences fit the head, increase strictly within and across bundles, and that no
 receipt ID is reused across bundles. It also checks that the head sequence has
 not decreased from the previous signed publish checkpoint on main's first-parent
-history, using the fetched `refs/notes/agent-gates-publish` notes. It rejects an
-untrusted prior checkpoint rather than silently skipping it.
+history, and requires the same hash when the sequence is equal, using the fetched `refs/notes/agent-gates-publish` notes. It rejects an
+untrusted prior checkpoint with `PREVIOUS_HEAD_UNVERIFIED`. Historical notes
+without `audit_head`, including Owner-only pushes, are skipped without checking
+their signatures.
 
 This proves receipt ordering and monotonic head growth, not the content of
 non-receipt events such as DENY. `chain` embeds the full exported audit chain and
@@ -267,8 +269,8 @@ attestations; publishing their evidence does not retroactively create audit anch
 
 Previous checkpoints are verified against the current `AGENT_GATES_OWNER_KEY`.
 When rotating the publish key, the Owner must re-sign the last checkpoint with
-the new key, preserving its range, `audit_head` and other contents, before the
-next publication. The old key alone is no longer a trusted checkpoint anchor.
+the new key using `publish resign-checkpoint`, preserving its range, `audit_head`
+and other contents, before the next publication. See the rotation steps below. The old key alone is no longer a trusted checkpoint anchor.
 Acceptance keys remain separate in `AGENT_GATES_ACCEPT_KEYS`.
 
 ## What it sets up
@@ -606,6 +608,50 @@ private key using `ssh-keygen -Y sign -n agent-gates-publish`:
 
 Pass the new public key through `--owner-key`. The signature authorizes that exact
 repository and key pair; an absent or invalid old-key signature refuses rotation.
+
+### Publish-key rotation (Owner's Mac)
+
+1. Pause publication and coordinate with other publishers. Fetch main and publish
+   notes into the Owner checkout. Identify the most recent first-parent note that
+   contains `audit_head`; set `CHECKPOINT` to that commit. Owner-only notes without
+   a head are not checkpoints.
+
+   ```bash
+   git fetch origin refs/heads/main refs/notes/agent-gates-publish:refs/notes/agent-gates-publish
+   git log --first-parent --oneline FETCH_HEAD
+   git notes --ref=refs/notes/agent-gates-publish show "$CHECKPOINT"
+   ```
+
+2. Verify the old signature and re-sign exactly that checkpoint. The command
+   changes only its signature, preserving all other fields. The old public key
+   must come from a trusted copy; a wrong key refuses without updating the notes.
+
+   ```bash
+   ./bin/agent-gates publish resign-checkpoint "$CHECKPOINT" \
+     --old-key /private/path/old-publish.pub --key /private/path/new-publish
+   ```
+
+3. Prepare the canonical rotation JSON described above and sign it with the old
+   private key. It must contain the same repository and old/new public keys.
+
+   ```bash
+   ssh-keygen -Y sign -f /private/path/old-publish -n agent-gates-publish /private/path/rotation.json
+   ```
+
+4. Publish the re-signed notes, then update the pinned publish key using the old-key
+   rotation proof. These are Owner actions against GitHub. Publish the updated
+   notes before running `publish.sh` again so its fetch retains the new signature.
+
+   ```bash
+   git push origin refs/notes/agent-gates-publish
+   ./bin/agent-gates github protect --owner-key /private/path/new-publish.pub \
+     --rotate --rotation-signature /private/path/rotation.json.sig
+   ```
+
+5. Resume publication with the new private key. Only the latest checkpoint needs
+   re-signing; intermediate headless Owner pushes do not need it. Acceptance keys
+   are independent and are not rotated by this procedure. If the checkpoint
+   cannot be verified, stop and resolve `PREVIOUS_HEAD_UNVERIFIED`; do not delete it.
 
 Publish from the Owner's clean main checkout on the Mac, with an existing origin:
 
