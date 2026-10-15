@@ -30,6 +30,8 @@ jobs:
         run: bash tests/test_observability.sh && bash tests/test_observability_b.sh
       - name: MCP stdio (offline, both OSes)
         run: bash tests/test_mcp.sh
+      - name: Minimal-disclosure publishing (offline, both OSes)
+        run: bash tests/test_publish.sh
   enforced:
     runs-on: ubuntu-latest
     steps:

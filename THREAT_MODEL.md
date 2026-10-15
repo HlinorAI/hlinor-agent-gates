@@ -1,4 +1,4 @@
-# Threat model — v0.6.0
+# Threat model — v0.7.0
 
 Supported: Linux, macOS. Not supported: Windows.
 
@@ -89,9 +89,30 @@ avoid executing local clean filters as root. Shared multi-project users require
 Owner resolution before archiving. Cleanup trusts only registered gate resources,
 respects resource/machine locks and runs runner-file removal as the runner UID.
 
-Publish attestation signs an export's `seq`/`hash` and full audit chain. The Action
-checks receipt seq/prev anchors and ordering alongside the existing receipt ID,
-signature and ref bindings. It does not prove an export is newer than another
-external checkpoint, or identify omitted receipt-less events without that
-checkpoint. Publish/acceptance keys remain separate. Old pre-audit receipts are
-validated using the v0.5 rules. PR checks remain advisory as documented in v0.5.
+Publish attestation defaults to `AUDIT_PUBLISH="head"`: only the signed audit
+`seq`/`hash` checkpoint is disclosed, alongside existing receipt notes. The Action
+checks receipt bounds, strict ordering within and across bundles, unique receipt
+IDs, and nondecreasing head sequence versus the previous signed checkpoint on
+main's first-parent history. Prior notes must verify against the current pinned
+publish key. After key rotation the Owner re-signs the last checkpoint with the
+new key, preserving its contents and head; embedded keys are not trust anchors.
+
+Head mode proves ordering and monotonic growth, not the content of non-receipt
+events such as DENY. It cannot detect rewriting hidden events, omission of a tail
+that never advanced a published checkpoint, or deletion of all external anchors.
+Preserve publish notes and independent exported checkpoints. A same-size head
+change is not detected by a sequence-only monotonicity check.
+
+Opt-in `AUDIT_PUBLISH="chain"` retains the full chain, canonical hash and receipt
+seq/prev/event/invalidation validation, at the cost of publishing audit events.
+Both modes still check receipt IDs, signatures and ref bindings; these checks do
+not make cooperative evidence resistant to a same-user attacker. Publish and
+acceptance keys remain separate. Pre-audit evidence keeps its legacy checks.
+PR checks remain advisory as documented in v0.5.
+
+The stdio MCP server exposes only fixed gate commands and strict arguments; it
+adds no Owner acceptance or new OS authority. Cooperative identity is still
+self-declared. Output is untrusted data even after sanitizing and truncation;
+a client must not follow instructions embedded in agent-authored gate fields.
+Closing stdin terminates the server and active child group, without answering
+queued requests. Configure client deadlines to allow CLI runner cleanup.

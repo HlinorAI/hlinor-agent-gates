@@ -16,7 +16,7 @@ import sys
 import tempfile
 import tarfile
 
-VERSION = '0.6.0'
+VERSION = '0.7.0'
 RECEIPTS = 'refs/notes/agent-gates'
 PUBLISH = 'refs/notes/agent-gates-publish'
 
@@ -223,9 +223,76 @@ def audit_snapshot(repo, export):
     return audit_chain(path.read_bytes())
 
 
+def publish_mode(repo, commit):
+    config = {}
+    for line in git(repo, 'show', commit + ':.agent-gates/config').decode().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        key, sep, value = line.partition('=')
+        parts = shlex.split(value, comments=True)
+        require(sep and re.fullmatch(r'[A-Z_]+', key) and len(parts) == 1,
+                'invalid committed publish policy')
+        config[key] = parts[0]
+    mode = config.get('AUDIT_PUBLISH', 'head')
+    require(mode in ('head', 'chain'), 'invalid AUDIT_PUBLISH')
+    return mode
+
+
+def checked_head(record):
+    head = record.get('audit_head')
+    require(isinstance(head, dict) and set(head) == {'seq', 'hash'} and
+            type(head['seq']) is int and head['seq'] >= 0 and
+            isinstance(head['hash'], str) and re.fullmatch(r'[a-f0-9]{64}', head['hash']),
+            'invalid publish audit head')
+    require(head['seq'] != 0 or head['hash'] == '0' * 64, 'invalid empty audit head')
+    return head
+
+
+def previous_head(repo, before, owner_key, name):
+    # Only notes attached to earlier first-parent main commits are checkpoints.
+    noted = {line.split()[1] for line in git(repo, 'notes', '--ref=' + PUBLISH, 'list').decode().splitlines()}
+    for commit in git(repo, 'rev-list', '--first-parent', before).decode().split():
+        if commit not in noted:
+            continue
+        record = note(repo, PUBLISH, commit)
+        require(record.get('kind') == 'publish' and record.get('schema') == 1 and
+                record.get('repo') == name and record.get('new_main') == commit,
+                'previous publish checkpoint binding mismatch')
+        verify_signature(record, owner_key, 'owner', 'agent-gates-publish')
+        if 'audit_head' in record:
+            return checked_head(record)
+    return None
+
+
+def check_head_attestation(record, bundles, commits):
+    head = checked_head(record)
+    require('audit_chain' not in record, 'head attestation discloses audit rows')
+    previous = 0
+    used = set()
+    for commit in commits:
+        if commit not in bundles:
+            continue
+        for kind in ('verification', 'acceptance', 'merge'):
+            receipt = bundles[commit][kind]
+            require(receipt['id'] not in used, 'receipt reused across bundles')
+            used.add(receipt['id'])
+            seq = receipt.get('audit_seq')
+            require(type(seq) is int and 0 < seq <= head['seq'], 'receipt audit sequence out of range')
+            require(isinstance(receipt.get('audit_prev'), str) and
+                    re.fullmatch(r'[a-f0-9]{64}', receipt['audit_prev']), 'invalid receipt audit predecessor')
+            require(seq > previous, 'receipt audit ordering mismatch')
+            previous = seq
+
+
 def check_audit_attestation(record, bundles, commits):
     audited=[bundles[c] for c in commits if c in bundles and 'verification' in bundles[c]
              and any('audit_seq' in bundles[c][kind] for kind in ('verification','acceptance','merge'))]
+    mode = record.get('audit_publish', 'chain')  # v0.6 attestations embed the chain.
+    require(mode in ('head', 'chain'), 'invalid attestation audit mode')
+    if mode == 'head':
+        check_head_attestation(record, bundles, commits)
+        return
     if not audited:return  # Immutable v0.5 receipts predate audit anchors.
     require('audit_chain' in record and 'audit_head' in record,'publish audit anchor missing')
     rows,head=audit_chain(b''.join(canonical(row)+b'\n' for row in record['audit_chain']))
@@ -263,7 +330,10 @@ def attest(repo, old, new, key, name, audit_export=None):
     if gate_commits:
         audited=any('audit_seq' in note(repo,RECEIPTS,c)['merge'] for c in gate_commits)
         if audited or audit_export:
-            record['audit_chain'],record['audit_head']=audit_snapshot(repo,audit_export)
+            chain, record['audit_head'] = audit_snapshot(repo, audit_export)
+            record['audit_publish'] = publish_mode(repo, new)
+            if record['audit_publish'] == 'chain':
+                record['audit_chain'] = chain
     result = subprocess.run(['ssh-keygen', '-Y', 'sign', '-f', str(key), '-n', 'agent-gates-publish'],
                             input=payload(record), capture_output=True)
     require(result.returncode == 0, 'could not sign publish attestation')
@@ -305,7 +375,14 @@ def check(repo, event, before, after, owner_key, name, rows=None, bundles=None, 
                 rows.append({'commit': commit, 'kind': 'Owner attested',
                              'author': git(repo, 'show', '-s', '--format=%an', commit).decode().strip(),
                              'verifier': '', 'tests': '', 'acceptance_id': '', 'result': 'PASS'})
+        if 'audit_publish' in attestation:
+            require(attestation['audit_publish'] == publish_mode(repo, after), 'publish mode differs from main policy')
         check_audit_attestation(attestation,bundles,commits)
+        if 'audit_head' in attestation:
+            current = checked_head(attestation)
+            checkpoint = previous_head(repo, before, owner_key, name)
+            require(checkpoint is None or current['seq'] >= checkpoint['seq'],
+                    'publish audit head decreased since previous checkpoint')
     else:
         bundles[after] = note(repo, RECEIPTS, after)
         row, bundle = check_merge(repo, after, accept_keys, used, before)

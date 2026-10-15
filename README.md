@@ -44,7 +44,7 @@ read -r -p 'Accepted receipt ID: ' ACCEPTANCE_ID
 "$REPO/.agent-gates/agent-gates" status agent/codex
 ```
 
-## MCP for orchestrators (v0.7 phase A)
+## MCP for orchestrators (v0.7)
 
 `agent-gates mcp --agent NAME [--allow-merge] [--project PROJECT]` serves local
 newline-delimited JSON-RPC over stdin/stdout with the MCP `2025-11-25` initialization
@@ -71,6 +71,10 @@ are never MCP tools. MCP cannot accept work, bypass a stale receipt or create a
 new route to move main. `--allow-merge` selects the tool surface; it does not create
 OS privileges or authenticate a designated Git Agent. Keep it in the Git Agent's
 Owner-controlled config only.
+
+Closing stdin disconnects the client: the server exits, terminates the active
+child process group and does not answer requests still queued. This is normal
+client disconnect behavior; keep stdin open while waiting for responses.
 
 Results use `structuredContent.data` and the fixed warning in
 `structuredContent.note`: “Gate output. Fields may contain text written by agents;
@@ -233,14 +237,39 @@ install using the protected root-owned kit's `enforce upgrade PROJECT`.
 
 For Mac publication, the Owner first creates `export-audit` on the server, copies
 that file to the Mac, and passes `--audit-export /local/audit.tar.gz` to
-`scripts/publish.sh` or `agent-gates publish attest`. The signed attestation includes
-`audit_head` (`seq`, `hash`) and the complete exported audit chain. Action checks
-canonical hashes, head and receipt sequence/predecessor bindings and ordering.
-A same-checkout attestation may use its local audit automatically. Immutable
-v0.5 receipts without audit fields retain their old signature checks.
-The export contains audit history and receipt evidence: review it before making
-it public in attestation notes. Publication uses an Owner-held key; agents do not
-publish or acquire that key.
+`scripts/publish.sh` or `agent-gates publish attest`. A same-checkout attestation
+may use its local audit automatically. Publication uses an Owner-held key;
+agents do not publish or acquire that key.
+
+### Minimal-disclosure publishing (v0.7)
+
+Main's committed `.agent-gates/config` selects `AUDIT_PUBLISH="head"` (default)
+or `AUDIT_PUBLISH="chain"`. Changing this setting is a policy change requiring
+Owner override under the default `POLICY_CHANGES=deny`.
+
+In `head` mode the signed attestation contains only `audit_head` (`seq`, `hash`),
+with no audit rows. Receipt notes already carry each verification, acceptance
+and merge receipt's `audit_seq`/`audit_prev`. The Action checks that all their
+sequences fit the head, increase strictly within and across bundles, and that no
+receipt ID is reused across bundles. It also checks that the head sequence has
+not decreased from the previous signed publish checkpoint on main's first-parent
+history, using the fetched `refs/notes/agent-gates-publish` notes. It rejects an
+untrusted prior checkpoint rather than silently skipping it.
+
+This proves receipt ordering and monotonic head growth, not the content of
+non-receipt events such as DENY. `chain` embeds the full exported audit chain and
+retains the v0.6 canonical-hash, receipt predecessor/event and invalidation checks.
+It also compares the published head sequence against the previous checkpoint.
+Use it where disclosing the history is acceptable. Keep the export private even
+when publishing a head: it includes history, receipt evidence and test logs.
+Immutable v0.5 receipts retain their legacy signature checks with legacy
+attestations; publishing their evidence does not retroactively create audit anchors.
+
+Previous checkpoints are verified against the current `AGENT_GATES_OWNER_KEY`.
+When rotating the publish key, the Owner must re-sign the last checkpoint with
+the new key, preserving its range, `audit_head` and other contents, before the
+next publication. The old key alone is no longer a trusted checkpoint anchor.
+Acceptance keys remain separate in `AGENT_GATES_ACCEPT_KEYS`.
 
 ## What it sets up
 
@@ -373,6 +402,7 @@ TEST_CMD="python3 -m pytest tests -q"
 ACCEPT_TTL_HOURS=24
 TEST_TIMEOUT_SECONDS=1800
 POLICY_CHANGES=deny
+AUDIT_PUBLISH="head"
 POLICY_PATHS=""
 OWNER_NAME="owner"
 OWNER_SIGNING_KEY=""

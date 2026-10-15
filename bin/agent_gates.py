@@ -110,6 +110,9 @@ def config():
             raise ValueError()
     except ValueError:
         raise EnvironmentError_("invalid ACCEPT_TTL_HOURS")
+    values.setdefault("AUDIT_PUBLISH", "head")
+    if values["AUDIT_PUBLISH"] not in ("head", "chain"):
+        raise EnvironmentError_("invalid AUDIT_PUBLISH")
     values.setdefault("POLICY_CHANGES", "deny")
     if values["POLICY_CHANGES"] not in ("deny", "warn"):
         raise EnvironmentError_("invalid POLICY_CHANGES")

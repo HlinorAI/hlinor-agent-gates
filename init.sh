@@ -240,7 +240,7 @@ import os, shlex, sys
 with open(sys.argv[1], "x") as stream:
     for key in ("MAIN_BRANCH", "WT_ROOT", "BACKUP_DIR", "TEST_CMD", "OWNER_NAME"):
         stream.write(key + "=" + shlex.quote(os.environ[key]) + "\n")
-    stream.write('ACCEPT_TTL_HOURS=24\nTEST_TIMEOUT_SECONDS=1800\nPOLICY_CHANGES=deny\nPOLICY_PATHS=""\nOWNER_SIGNING_KEY=""\nNOTIFY_CMD=""\nNOTIFY_EVENTS="verify,merge,deny,expiring"\n')
+    stream.write('ACCEPT_TTL_HOURS=24\nTEST_TIMEOUT_SECONDS=1800\nPOLICY_CHANGES=deny\nAUDIT_PUBLISH="head"\nPOLICY_PATHS=""\nOWNER_SIGNING_KEY=""\nNOTIFY_CMD=""\nNOTIFY_EVENTS="verify,merge,deny,expiring"\n')
 CONFIG
 
 GI="$REPO/.gitignore"
