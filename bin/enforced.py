@@ -19,7 +19,7 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 CODE = Path("/opt/agent-gates")
 REPOS = Path("/srv/agent-gates")
 STATE = Path("/var/lib/agent-gates")
@@ -36,7 +36,7 @@ agent-gates ALL=(ag-runner)   NOPASSWD: /opt/agent-gates/bin/ag-run *
 agent-gates ALL=(ag-notify)   NOPASSWD: /opt/agent-gates/bin/ag-notify
 """
 KIT_FILES = ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run",
-             "enforced_runtime.py", "github_verify.py", "github_protect.py", "ag-notify", "ag_notify.py")
+             "enforced_runtime.py", "github_verify.py", "github_protect.py", "ag-notify", "ag_notify.py", "mcp_server.py")
 
 
 

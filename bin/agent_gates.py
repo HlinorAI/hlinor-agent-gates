@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 sys.dont_write_bytecode = True
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 
 
 class Deny(Exception):
@@ -1104,6 +1104,11 @@ class Gates(obs.Observability):
 
 
 def main():
+    if sys.argv[1:2] == ["mcp"]:
+        source=Path(__file__).resolve().parent
+        spec=importlib.util.spec_from_file_location("mcp_server",source / "mcp_server.py")
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        return module.main(sys.argv[2:],source / "agent-gates",sys.modules[__name__])
     if sys.argv[1:3] == ["github", "protect"]:
         spec = importlib.util.spec_from_file_location("github_protect", Path(__file__).resolve().parent / "github_protect.py")
         module = importlib.util.module_from_spec(spec)
@@ -1134,7 +1139,7 @@ def main():
         # Validate before importing project-controlled Python into a root process.
         if sys.argv[1:3] in (["enforce", "init"], ["enforce", "upgrade"]):
             paths = [source / name for name in
-                     ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py", "github_verify.py", "github_protect.py", "ag-notify", "ag_notify.py")]
+                     ("agent-gates", "agent_gates.py", "enforced.py", "gate-receive-pack", "pre-receive", "ag-run", "enforced_runtime.py", "github_verify.py", "github_protect.py", "ag-notify", "ag_notify.py", "mcp_server.py")]
             paths += [source, *source.parents]
             trusted = (source.name == "bin" and ".agent-gates" not in source.parts
                        and ".agent-gates" not in Path(__file__).absolute().parts

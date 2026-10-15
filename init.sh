@@ -17,7 +17,7 @@
 #   --dry-run             print what would happen, change nothing
 set -euo pipefail
 
-VERSION="0.4.0"
+VERSION="0.7.0"
 INSTALL_ARGS=("$@")
 KIT="$(cd "$(dirname "$0")" && pwd)"
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -231,6 +231,7 @@ install -m 755 "$KIT/templates/add_agent.sh" "$REPO/.agent-gates/add_agent.sh"
 install -m 755 "$KIT/templates/backup.sh"    "$REPO/.agent-gates/backup.sh"
 install -m 755 "$KIT/bin/agent-gates" "$REPO/.agent-gates/agent-gates"
 install -m 644 "$KIT/bin/agent_gates.py" "$REPO/.agent-gates/agent_gates.py"
+install -m 644 "$KIT/bin/mcp_server.py" "$REPO/.agent-gates/mcp_server.py"
 install -m 644 "$KIT/bin/github_verify.py" "$REPO/.agent-gates/github_verify.py"
 install -m 644 "$KIT/bin/github_protect.py" "$REPO/.agent-gates/github_protect.py"
 MAIN_BRANCH="$MAIN_BRANCH" WT_ROOT="$WT_ROOT" BACKUP_DIR="$BACKUP_DIR" \
