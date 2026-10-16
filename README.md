@@ -521,7 +521,9 @@ Git 2.43 on Ubuntu 24.04 does not support. Git >= 2.38 remains the minimum for
 `merge-tree --write-tree`, not wildcard support.
 Runner cleanup starts in `/` so an SSH caller's private home cannot break find.
 A cleanup failure reports the first undeleted or uninspectable path, JSON-quoted
-with control characters escaped, without exposing file contents.
+with control characters escaped, without exposing file contents. Foreign temporary
+directories that are neither readable nor writable by ag-runner are pruned;
+writable but unreadable directories still cause a cleanup refusal.
 For a project named `project`, the review flow is:
 
 ```bash

@@ -96,36 +96,55 @@ finally:
 print('PASS cleanup DENY names first undeleted path, escapes controls, leaks no contents, preserves main', flush=True)
 
 
-# Failure to inspect another UID's private temporary directory is not ignored.
-private = Path('/tmp/agent-gates-private-neighbor')
-private.mkdir(mode=0o700)
-sentinel = private / 'private-content'
-sentinel.write_text('NEIGHBOR SECRET CONTENT')
+# Private foreign directories cannot contain files the runner could create.
+# Keep them during the negative scan too: diagnostics must skip these paths.
+private_dirs = [Path(root) / 'systemd-private-x' for root in ('/tmp', '/var/tmp')]
+for private in private_dirs:
+    private.mkdir(mode=0o700)
+    (private / 'private-content').write_text('NEIGHBOR SECRET CONTENT')
+
+# Writable but unreadable foreign directories can hide runner files: fail closed.
+opaque = Path('/tmp/agent-gates-writable-neighbor')
+opaque.mkdir()
+opaque.chmod(0o733)
+(opaque / 'runner-file').write_text('RUNNER SECRET CONTENT')
+os.chown(opaque / 'runner-file', runner.pw_uid, runner.pw_gid)
 try:
     result = review(ok=False)
     message = result.stdout + result.stderr
     assert result.returncode == 1 and message.startswith('DENY RUNNER_CLEANUP_FAILED:'), message
-    assert json.dumps(str(private)) in message, message
-    assert 'NEIGHBOR SECRET' not in message and len(message.splitlines()) == 1
-    assert sentinel.read_text() == 'NEIGHBOR SECRET CONTENT' and git('rev-parse', 'main') == base
+    assert json.dumps(str(opaque)) in message, message
+    assert all(str(private) not in message for private in private_dirs), message
+    assert 'SECRET CONTENT' not in message and len(message.splitlines()) == 1
+    assert (opaque / 'runner-file').read_text() == 'RUNNER SECRET CONTENT'
+    assert git('rev-parse', 'main') == base
 finally:
-    shutil.rmtree(private)
-print('PASS uninspectable foreign temp directory still denies with exact path and unchanged main', flush=True)
+    shutil.rmtree(opaque)
+print('PASS foreign 0733 directory with runner file denies, skips private paths in diagnostics and preserves main', flush=True)
 
-result = review()
-ident = result.stdout.strip().splitlines()[-1]
-record = json.loads((RECEIPTS / ('verification-' + ident + '.json')).read_text())
-assert record['verdict'] == 'ACCEPT' and record['test_cmd'] == 'python3 -m pytest tests -q'
-assert record['result']['exit'] == 0 and record['baseline']['exit'] == 0
-assert '1 passed' in record['result']['summary'] and '1 passed' in record['baseline']['summary']
-assert record['verifier'] == 'agent-claude' and git('rev-parse', 'main') == base
-for root in ('/tmp', '/var/tmp', '/dev/shm'):
-    remaining = run('find', root, '-xdev', '-user', 'ag-runner', '-print').stdout
-    assert not remaining, remaining
-print('PASS private SSH home with pytest tmp_path, __pycache__, .pytest_cache; branch+baseline pass and no runner temp files remain', flush=True)
+try:
+    result = review()
+    ident = result.stdout.strip().splitlines()[-1]
+    record = json.loads((RECEIPTS / ('verification-' + ident + '.json')).read_text())
+    assert record['verdict'] == 'ACCEPT' and record['test_cmd'] == 'python3 -m pytest tests -q'
+    assert record['result']['exit'] == 0 and record['baseline']['exit'] == 0
+    assert '1 passed' in record['result']['summary'] and '1 passed' in record['baseline']['summary']
+    assert record['verifier'] == 'agent-claude' and git('rev-parse', 'main') == base
+    for root in ('/tmp', '/var/tmp', '/dev/shm'):
+        remaining = run('find', root, '-xdev', '-user', 'ag-runner', '-print').stdout
+        assert not remaining, remaining
+    print('PASS private SSH home with pytest tmp_path, __pycache__, .pytest_cache; branch+baseline pass and no runner temp files remain', flush=True)
+    for private in private_dirs:
+        assert stat.S_IMODE(private.stat().st_mode) == 0o700
+        assert (private / 'private-content').read_text() == 'NEIGHBOR SECRET CONTENT'
+    assert git('rev-parse', 'main') == base
+    print('PASS root 0700 systemd-private-x in /tmp and /var/tmp is pruned; verify succeeds and foreign files/main remain unchanged', flush=True)
+finally:
+    for private in private_dirs:
+        shutil.rmtree(private)
 a = run(CLI, 'accept', ident, '--yes').stdout.strip().splitlines()[-1]
 run('runuser', '-u', 'agent-codex', '--', 'sudo', '-n', '-u', 'agent-gates', CLI, 'merge', PROJECT, a)
 assert git('rev-parse', 'main') != base
 run(CLI, 'doctor', PROJECT)
 print('PASS signed Owner acceptance, gated merge and doctor after pytest cleanup', flush=True)
-print('5 passed, 0 failed (v0.7.1 container regressions)', flush=True)
+print('6 passed, 0 failed (v0.7.1 container regressions)', flush=True)

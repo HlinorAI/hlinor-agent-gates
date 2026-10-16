@@ -2,6 +2,8 @@
 
 ## 0.7.1 — 2026-10-16
 
+- Runner cleanup prunes foreign temporary directories that are neither readable nor writable, including systemd private directories; writable but unreadable directories still fail closed.
+
 - Enforced initialization trusts each exact bare-repository path, including multiple projects per agent, without relying on unsupported Git 2.43 safe.directory directory wildcards.
 - Runner helpers start in `/`: SSH login from a private agent home no longer causes find to fail when restoring its initial working directory. Cleanup retains the same runner UID, sudo rules, filesystem boundaries and fail-closed behavior.
 - Cleanup refusals identify the first undeleted or uninspectable temporary path with escaped control characters and no file contents.

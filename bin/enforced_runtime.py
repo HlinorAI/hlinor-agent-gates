@@ -87,7 +87,13 @@ def first_scan_error(roots):
             # Match find -xdev; diagnostic traversal never follows symlinks.
             for name in directories[:]:
                 try:
-                    if os.lstat(os.path.join(parent, name)).st_dev != device:
+                    path = os.path.join(parent, name)
+                    metadata = os.lstat(path)
+                    private = (stat.S_ISDIR(metadata.st_mode)
+                               and metadata.st_uid != os.geteuid()
+                               and not os.access(path, os.R_OK)
+                               and not os.access(path, os.W_OK))
+                    if metadata.st_dev != device or private:
                         directories.remove(name)
                 except OSError as exc:
                     return exc.filename
@@ -106,13 +112,35 @@ def runner_main(argv):
     os.chdir("/")
     if argv == ["clean"]:
         roots = ["/tmp", "/var/tmp", "/dev/shm"]
-        deleted = subprocess.run(["/usr/bin/find", *roots, "-xdev", "-ignore_readdir_race",
-                                  "-user", "ag-runner", "(", "-delete", "-o", "-print0", "-quit", ")"], capture_output=True)
-        remaining = subprocess.run(["/usr/bin/find", *roots, "-xdev", "-ignore_readdir_race",
-                                    "-user", "ag-runner", "-print0", "-quit"], capture_output=True)
-        if deleted.returncode or remaining.returncode or remaining.stdout:
-            failed = deleted.stdout.split(b"\0", 1)[0] or remaining.stdout.split(b"\0", 1)[0]
-            path = failed or first_scan_error(roots)
+        # -delete implies -depth, which defeats -prune. Collect a pre-order
+        # inventory, then delete children before parents as the runner UID.
+        scan = ["/usr/bin/find", *roots, "-xdev", "-ignore_readdir_race",
+                "(", "-type", "d", "!", "-user", "ag-runner",
+                "!", "-readable", "!", "-writable", "-prune", ")", "-o",
+                "-user", "ag-runner", "-print0"]
+        inventory = subprocess.run(scan, capture_output=True)
+        if inventory.returncode:
+            deny("RUNNER_CLEANUP_FAILED", "could not remove or inspect temporary path "
+                 + temporary_path(first_scan_error(roots)))
+        failed = None
+        paths = [path for path in inventory.stdout.split(b"\0") if path]
+        for path in sorted(paths, key=lambda item: item.count(b"/"), reverse=True):
+            try:
+                metadata = os.lstat(path)
+                if metadata.st_uid != runner.pw_uid:
+                    continue
+                if stat.S_ISDIR(metadata.st_mode):
+                    os.rmdir(path)
+                else:
+                    os.unlink(path)
+            except FileNotFoundError:
+                continue  # Match -ignore_readdir_race.
+            except OSError:
+                failed = path
+                break
+        remaining = subprocess.run(scan, capture_output=True)
+        if failed or remaining.returncode or remaining.stdout:
+            path = failed or remaining.stdout.split(b"\0", 1)[0] or first_scan_error(roots)
             deny("RUNNER_CLEANUP_FAILED", "could not remove or inspect temporary path " + temporary_path(path))
         return 0
     if argv == ["kill"]:
