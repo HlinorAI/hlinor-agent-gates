@@ -515,6 +515,13 @@ The Owner must use separate non-root OS accounts to launch agents.
 Setup creates `agent-<name>` clones in `/home/agent-<name>/work/<project>`, the gate
 in `/opt/agent-gates`, bare repositories in `/srv/agent-gates`, and private state
 in `/var/lib/agent-gates`. Agent clones use the restricted `gate` remote.
+Each agent trusts the exact `safe.directory=/srv/agent-gates/<project>.git` path
+for each installed project; setup does not rely on directory wildcards, which
+Git 2.43 on Ubuntu 24.04 does not support. Git >= 2.38 remains the minimum for
+`merge-tree --write-tree`, not wildcard support.
+Runner cleanup starts in `/` so an SSH caller's private home cannot break find.
+A cleanup failure reports the first undeleted or uninspectable path, JSON-quoted
+with control characters escaped, without exposing file contents.
 For a project named `project`, the review flow is:
 
 ```bash

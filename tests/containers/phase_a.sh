@@ -61,7 +61,7 @@ for name in codex claude zcode; do
   account="agent-$name"; clone="/home/$account/work/project"
   test "$(runuser -u "$account" -- git -C "$clone" branch --show-current)" = "agent/$name"
   test "$(runuser -u "$account" -- git -C "$clone" config remote.gate.url)" = /srv/agent-gates/project.git
-  test "$(runuser -u "$account" -- git config --global --get safe.directory)" = '/srv/agent-gates/*'
+  test "$(runuser -u "$account" -- git config --global --get safe.directory)" = '/srv/agent-gates/project.git'
 done
 printf 'PASS independent clones and safe.directory\n'
 runuser -u agent-codex -- bash -c 'cd /home/agent-codex/work/project; echo feature > feature; git add feature; git commit -qm feature; git push gate agent/codex' > /tmp/push-own.log 2>&1 || { cat /tmp/push-own.log; exit 1; }
