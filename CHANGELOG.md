@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.1 — 2026-10-16
+
+- Runner cleanup prunes foreign temporary directories that are neither readable nor writable, including systemd private directories; writable but unreadable directories still fail closed.
+
+- Enforced initialization trusts each exact bare-repository path, including multiple projects per agent, without relying on unsupported Git 2.43 safe.directory directory wildcards.
+- Runner helpers start in `/`: SSH login from a private agent home no longer causes find to fail when restoring its initial working directory. Cleanup retains the same runner UID, sudo rules, filesystem boundaries and fail-closed behavior.
+- Cleanup refusals identify the first undeleted or uninspectable temporary path with escaped control characters and no file contents.
+- Added Ubuntu 24.04 enforced regressions for exact trust, pytest tmp_path/bytecode/cache cleanup from a private login home, and failed-deletion diagnostics. No macOS or remote CI result is claimed.
+
 ## 0.7.0 — 2026-10-15
 
 - Added a stdlib stdio MCP server with an explicit tool allow-list, strict schemas, serialized fixed-argv CLI calls, bounded untrusted output and disconnect cleanup. Owner acceptance remains terminal-only; merge tools require `--allow-merge` and existing gate permissions.

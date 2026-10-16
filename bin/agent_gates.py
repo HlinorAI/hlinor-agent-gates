@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 sys.dont_write_bytecode = True
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 
 
 class Deny(Exception):

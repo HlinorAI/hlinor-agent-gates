@@ -19,7 +19,7 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 CODE = Path("/opt/agent-gates")
 REPOS = Path("/srv/agent-gates")
 STATE = Path("/var/lib/agent-gates")
@@ -453,8 +453,8 @@ def init(repo_arg, agent_names):
         secure_dir(home, account.pw_uid, agents.gr_gid, 0o700)
         secure_dir(home / "work", account.pw_uid, agents.gr_gid, 0o700)
         clone = home / "work" / project
-        run("git", "config", "--global", "--add", "safe.directory", "/srv/agent-gates/*", uid=account.pw_name)
-        # Git also requires safe.directory for the parent before reading bare config.
+        run("git", "config", "--global", "--add", "safe.directory", str(bare), uid=account.pw_name)
+        # Exact paths do not require Git's newer directory wildcard support.
         run("git", "clone", "--no-local", "--origin", "gate", str(bare), str(clone), uid=account.pw_name)
         run("git", "-C", str(clone), "config", "remote.gate.receivepack",
             "sudo -u agent-gates /opt/agent-gates/bin/gate-receive-pack", uid=account.pw_name)

@@ -16,7 +16,7 @@ import sys
 import tempfile
 import tarfile
 
-VERSION = '0.7.0'
+VERSION = '0.7.1'
 RECEIPTS = 'refs/notes/agent-gates'
 PUBLISH = 'refs/notes/agent-gates-publish'
 

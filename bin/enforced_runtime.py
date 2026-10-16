@@ -63,19 +63,85 @@ def environment():
             "GIT_COMMITTER_NAME": "agent-gates", "GIT_COMMITTER_EMAIL": "agent-gates@local"}
 
 
+def temporary_path(path):
+    # Refusals contain one bounded JSON-quoted filename, never file contents or
+    # raw find stderr (filenames may contain newlines or terminal escapes).
+    return json.dumps(os.fsdecode(path)[:1024], ensure_ascii=True)
+
+
+def cleanup_refusal(result, fallback):
+    detail = (result.stderr or result.stdout).decode(errors="replace").strip()
+    prefix = "DENY RUNNER_CLEANUP_FAILED: "
+    if detail.startswith(prefix) and "\n" not in detail:
+        deny("RUNNER_CLEANUP_FAILED", detail[len(prefix):])
+    deny("RUNNER_CLEANUP_FAILED", "could not remove or inspect temporary path " + temporary_path(fallback))
+
+
+def first_scan_error(roots):
+    errors = []
+    for root in roots:
+        device = os.stat(root).st_dev
+        for parent, directories, _ in os.walk(root, followlinks=False, onerror=errors.append):
+            if errors:
+                return errors[0].filename
+            # Match find -xdev; diagnostic traversal never follows symlinks.
+            for name in directories[:]:
+                try:
+                    path = os.path.join(parent, name)
+                    metadata = os.lstat(path)
+                    private = (stat.S_ISDIR(metadata.st_mode)
+                               and metadata.st_uid != os.geteuid()
+                               and not os.access(path, os.R_OK)
+                               and not os.access(path, os.W_OK))
+                    if metadata.st_dev != device or private:
+                        directories.remove(name)
+                except OSError as exc:
+                    return exc.filename
+        if errors:
+            return errors[0].filename
+    return roots[0]  # A transient scan error still fails closed.
+
+
 def runner_main(argv):
     """Only the gate may invoke this via the single ag-run sudo rule."""
     runner = pwd.getpwnam("ag-runner")
     if os.geteuid() != runner.pw_uid or os.environ.get("SUDO_USER") != "agent-gates":
         deny("INVALID_IDENTITY", "runner requires sudo from agent-gates")
+    # SSH callers start in a private agent home. find must be able to restore
+    # its initial cwd; the runner must never inherit that inaccessible directory.
+    os.chdir("/")
     if argv == ["clean"]:
         roots = ["/tmp", "/var/tmp", "/dev/shm"]
-        deleted = subprocess.run(["/usr/bin/find", *roots, "-xdev", "-ignore_readdir_race",
-                                  "-user", "ag-runner", "-delete"], capture_output=True)
-        remaining = subprocess.run(["/usr/bin/find", *roots, "-xdev", "-ignore_readdir_race",
-                                    "-user", "ag-runner", "-print", "-quit"], capture_output=True)
-        if deleted.returncode or remaining.returncode or remaining.stdout:
-            deny("RUNNER_CLEANUP_FAILED", "runner-owned temporary files could not be fully removed")
+        # -delete implies -depth, which defeats -prune. Collect a pre-order
+        # inventory, then delete children before parents as the runner UID.
+        scan = ["/usr/bin/find", *roots, "-xdev", "-ignore_readdir_race",
+                "(", "-type", "d", "!", "-user", "ag-runner",
+                "!", "-readable", "!", "-writable", "-prune", ")", "-o",
+                "-user", "ag-runner", "-print0"]
+        inventory = subprocess.run(scan, capture_output=True)
+        if inventory.returncode:
+            deny("RUNNER_CLEANUP_FAILED", "could not remove or inspect temporary path "
+                 + temporary_path(first_scan_error(roots)))
+        failed = None
+        paths = [path for path in inventory.stdout.split(b"\0") if path]
+        for path in sorted(paths, key=lambda item: item.count(b"/"), reverse=True):
+            try:
+                metadata = os.lstat(path)
+                if metadata.st_uid != runner.pw_uid:
+                    continue
+                if stat.S_ISDIR(metadata.st_mode):
+                    os.rmdir(path)
+                else:
+                    os.unlink(path)
+            except FileNotFoundError:
+                continue  # Match -ignore_readdir_race.
+            except OSError:
+                failed = path
+                break
+        remaining = subprocess.run(scan, capture_output=True)
+        if failed or remaining.returncode or remaining.stdout:
+            path = failed or remaining.stdout.split(b"\0", 1)[0] or first_scan_error(roots)
+            deny("RUNNER_CLEANUP_FAILED", "could not remove or inspect temporary path " + temporary_path(path))
         return 0
     if argv == ["kill"]:
         # exec avoids killing the cleanup supervisor itself: pkill excludes its own PID.
@@ -86,19 +152,25 @@ def runner_main(argv):
         deny("INVALID_ARGUMENT", "invalid runner directory token")
     work = Path("/tmp") / ("agent-gates-run-" + argv[1])
     if argv[0] == "remove":
-        if work.is_symlink():
-            work.unlink()
-        elif work.exists():
-            if work.lstat().st_uid != runner.pw_uid:
-                deny("UNSAFE_PATH", "runner does not own export")
-            # Tests own the export and may remove directory permissions.
-            work.chmod(0o700)
-            for root, dirs, _ in os.walk(work, topdown=True, followlinks=False):
-                for name in dirs:
-                    directory = Path(root) / name
-                    if not directory.is_symlink():
-                        directory.chmod(0o700)
-            shutil.rmtree(work)
+        def removal_error(function, path, exc_info):
+            deny("RUNNER_CLEANUP_FAILED", "could not remove temporary path " + temporary_path(path))
+
+        try:
+            if work.is_symlink():
+                work.unlink()
+            elif work.exists():
+                if work.lstat().st_uid != runner.pw_uid:
+                    deny("UNSAFE_PATH", "runner does not own export")
+                # Tests own the export and may remove directory permissions.
+                work.chmod(0o700)
+                for root, dirs, _ in os.walk(work, topdown=True, followlinks=False):
+                    for name in dirs:
+                        directory = Path(root) / name
+                        if not directory.is_symlink():
+                            directory.chmod(0o700)
+                shutil.rmtree(work, onerror=removal_error)
+        except OSError as exc:
+            removal_error(None, exc.filename or work, None)
         return 0
     work.mkdir(mode=0o700)  # exclusive; never reuse an attacker-prepared directory
     # Extraction is unprivileged. Reject .git, special files and escaping links.
@@ -469,10 +541,10 @@ class Gates(obs.Observability):
             deny("RUNNER_CLEANUP_FAILED", "could not kill runner processes")
         result = self.runner("remove", token)
         if result.returncode:
-            deny("RUNNER_CLEANUP_FAILED", "could not remove runner export")
+            cleanup_refusal(result, "/tmp/agent-gates-run-" + token)
         result = self.runner("clean")
         if result.returncode:
-            deny("RUNNER_CLEANUP_FAILED", "could not clear runner-owned temporary files")
+            cleanup_refusal(result, "/tmp")
         # Zombies cannot execute; ignore them, but deny if any live process remains.
         uid = pwd.getpwnam("ag-runner").pw_uid
         deadline = time.monotonic() + 2
